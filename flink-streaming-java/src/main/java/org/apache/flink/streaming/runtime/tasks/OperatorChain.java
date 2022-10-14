@@ -22,20 +22,27 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
+import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.StateObjectCollection;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.event.AbstractEvent;
 import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.io.network.api.StopMode;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriter;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriterDelegate;
 import org.apache.flink.runtime.io.network.partition.consumer.IndexedInputGate;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.metrics.MetricNames;
+import org.apache.flink.runtime.operators.coordination.AcknowledgeCheckpointEvent;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.operators.coordination.OperatorEventDispatcher;
 import org.apache.flink.runtime.plugable.SerializationDelegate;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.streaming.api.graph.NonChainedOutput;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.operators.BoundedMultiInput;
@@ -160,12 +167,13 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
 
         // create the final output stream writers
         // we iterate through all the out edges from this job vertex and create a stream output
-        List<StreamEdge> outEdgesInOrder = configuration.getOutEdgesInOrder(userCodeClassloader);
-        Map<StreamEdge, RecordWriterOutput<?>> streamOutputMap =
-                new HashMap<>(outEdgesInOrder.size());
-        this.streamOutputs = new RecordWriterOutput<?>[outEdgesInOrder.size()];
+        List<NonChainedOutput> outputsInOrder =
+                configuration.getVertexNonChainedOutputs(userCodeClassloader);
+        Map<IntermediateDataSetID, RecordWriterOutput<?>> recordWriterOutputs =
+                new HashMap<>(outputsInOrder.size());
+        this.streamOutputs = new RecordWriterOutput<?>[outputsInOrder.size()];
         this.finishedOnRestoreInput =
-                this.isFinishedOnRestore()
+                this.isTaskDeployedAsFinished()
                         ? new FinishedOnRestoreInput(
                                 streamOutputs, configuration.getInputs(userCodeClassloader).length)
                         : null;
@@ -174,11 +182,11 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
         boolean success = false;
         try {
             createChainOutputs(
-                    outEdgesInOrder,
+                    outputsInOrder,
                     recordWriterDelegate,
                     chainedConfigs,
                     containingTask,
-                    streamOutputMap);
+                    recordWriterOutputs);
 
             // we create the chain of operators and grab the collector that leads into the chain
             List<StreamOperatorWrapper<?, ?>> allOpWrappers =
@@ -189,7 +197,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                             configuration,
                             chainedConfigs,
                             userCodeClassloader,
-                            streamOutputMap,
+                            recordWriterOutputs,
                             allOpWrappers,
                             containingTask.getMailboxExecutorFactory());
 
@@ -273,7 +281,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
         firstOperatorWrapper = linkOperatorWrappers(allOperatorWrappers);
     }
 
-    public abstract boolean isFinishedOnRestore();
+    public abstract boolean isTaskDeployedAsFinished();
 
     public abstract void dispatchOperatorEvent(
             OperatorID operator, SerializedValue<OperatorEvent> event) throws FlinkException;
@@ -290,7 +298,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
     /**
      * Initialize state and open all operators in the chain from <b>tail to heads</b>, contrary to
      * {@link StreamOperator#close()} which happens <b>heads to tail</b> (see {@link
-     * #finishOperators(StreamTaskActionExecutor)}).
+     * #finishOperators(StreamTaskActionExecutor, StopMode)}).
      */
     public abstract void initializeStateAndOpenOperators(
             StreamTaskStateInitializer streamTaskStateInitializer) throws Exception;
@@ -300,11 +308,14 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
      * operator in the chain, contrary to {@link StreamOperator#open()} which happens <b>tail to
      * heads</b> (see {@link #initializeStateAndOpenOperators(StreamTaskStateInitializer)}).
      */
-    public abstract void finishOperators(StreamTaskActionExecutor actionExecutor) throws Exception;
+    public abstract void finishOperators(StreamTaskActionExecutor actionExecutor, StopMode stopMode)
+            throws Exception;
 
     public abstract void notifyCheckpointComplete(long checkpointId) throws Exception;
 
     public abstract void notifyCheckpointAborted(long checkpointId) throws Exception;
+
+    public abstract void notifyCheckpointSubsumed(long checkpointId) throws Exception;
 
     public abstract void snapshotState(
             Map<OperatorID, OperatorSnapshotFutures> operatorSnapshotsInProgress,
@@ -326,6 +337,18 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
     public void broadcastEvent(AbstractEvent event, boolean isPriorityEvent) throws IOException {
         for (RecordWriterOutput<?> streamOutput : streamOutputs) {
             streamOutput.broadcastEvent(event, isPriorityEvent);
+        }
+    }
+
+    public void alignedBarrierTimeout(long checkpointId) throws IOException {
+        for (RecordWriterOutput<?> streamOutput : streamOutputs) {
+            streamOutput.alignedBarrierTimeout(checkpointId);
+        }
+    }
+
+    public void abortCheckpoint(long checkpointId, CheckpointException cause) {
+        for (RecordWriterOutput<?> streamOutput : streamOutputs) {
+            streamOutput.abortCheckpoint(checkpointId, cause);
         }
     }
 
@@ -425,6 +448,31 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
         return (mainOperatorWrapper == null) ? null : mainOperatorWrapper.getStreamOperator();
     }
 
+    @Nullable
+    protected StreamOperator<?> getTailOperator() {
+        return (tailOperatorWrapper == null) ? null : tailOperatorWrapper.getStreamOperator();
+    }
+
+    protected void snapshotChannelStates(
+            StreamOperator<?> op,
+            ChannelStateWriter.ChannelStateWriteResult channelStateWriteResult,
+            OperatorSnapshotFutures snapshotInProgress) {
+        if (op == getMainOperator()) {
+            snapshotInProgress.setInputChannelStateFuture(
+                    channelStateWriteResult
+                            .getInputChannelStateHandles()
+                            .thenApply(StateObjectCollection::new)
+                            .thenApply(SnapshotResult::of));
+        }
+        if (op == getTailOperator()) {
+            snapshotInProgress.setResultSubpartitionStateFuture(
+                    channelStateWriteResult
+                            .getResultSubpartitionStateHandles()
+                            .thenApply(StateObjectCollection::new)
+                            .thenApply(SnapshotResult::of));
+        }
+    }
+
     public boolean isClosed() {
         return isClosed;
     }
@@ -455,40 +503,41 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
     // ------------------------------------------------------------------------
 
     private void createChainOutputs(
-            List<StreamEdge> outEdgesInOrder,
+            List<NonChainedOutput> outputsInOrder,
             RecordWriterDelegate<SerializationDelegate<StreamRecord<OUT>>> recordWriterDelegate,
             Map<Integer, StreamConfig> chainedConfigs,
             StreamTask<OUT, OP> containingTask,
-            Map<StreamEdge, RecordWriterOutput<?>> streamOutputMap) {
-        for (int i = 0; i < outEdgesInOrder.size(); i++) {
-            StreamEdge outEdge = outEdgesInOrder.get(i);
+            Map<IntermediateDataSetID, RecordWriterOutput<?>> recordWriterOutputs) {
+        for (int i = 0; i < outputsInOrder.size(); ++i) {
+            NonChainedOutput output = outputsInOrder.get(i);
 
-            RecordWriterOutput<?> streamOutput =
+            RecordWriterOutput<?> recordWriterOutput =
                     createStreamOutput(
                             recordWriterDelegate.getRecordWriter(i),
-                            outEdge,
-                            chainedConfigs.get(outEdge.getSourceId()),
+                            output,
+                            chainedConfigs.get(output.getSourceNodeId()),
                             containingTask.getEnvironment());
 
-            this.streamOutputs[i] = streamOutput;
-            streamOutputMap.put(outEdge, streamOutput);
+            this.streamOutputs[i] = recordWriterOutput;
+            recordWriterOutputs.put(output.getDataSetId(), recordWriterOutput);
         }
     }
 
     private RecordWriterOutput<OUT> createStreamOutput(
             RecordWriter<SerializationDelegate<StreamRecord<OUT>>> recordWriter,
-            StreamEdge edge,
+            NonChainedOutput streamOutput,
             StreamConfig upStreamConfig,
             Environment taskEnvironment) {
-        OutputTag sideOutputTag = edge.getOutputTag(); // OutputTag, return null if not sideOutput
+        OutputTag sideOutputTag =
+                streamOutput.getOutputTag(); // OutputTag, return null if not sideOutput
 
         TypeSerializer outSerializer;
 
-        if (edge.getOutputTag() != null) {
+        if (streamOutput.getOutputTag() != null) {
             // side output
             outSerializer =
                     upStreamConfig.getTypeSerializerSideOut(
-                            edge.getOutputTag(),
+                            streamOutput.getOutputTag(),
                             taskEnvironment.getUserCodeClassLoader().asClassLoader());
         } else {
             // main output
@@ -502,7 +551,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                         recordWriter,
                         outSerializer,
                         sideOutputTag,
-                        edge.supportsUnalignedCheckpoints()));
+                        streamOutput.supportsUnalignedCheckpoints()));
     }
 
     @SuppressWarnings("rawtypes")
@@ -564,7 +613,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                     sourceInput,
                     new ChainedSource(
                             chainedSourceOutput,
-                            this.isFinishedOnRestore()
+                            this.isTaskDeployedAsFinished()
                                     ? new StreamTaskFinishedOnRestoreSourceInput<>(
                                             sourceOperator, sourceInputGateIndex++, inputId)
                                     : new StreamTaskSourceInput<>(
@@ -603,18 +652,19 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
             StreamConfig operatorConfig,
             Map<Integer, StreamConfig> chainedConfigs,
             ClassLoader userCodeClassloader,
-            Map<StreamEdge, RecordWriterOutput<?>> streamOutputs,
+            Map<IntermediateDataSetID, RecordWriterOutput<?>> recordWriterOutputs,
             List<StreamOperatorWrapper<?, ?>> allOperatorWrappers,
             MailboxExecutorFactory mailboxExecutorFactory) {
-        List<Tuple2<WatermarkGaugeExposingOutput<StreamRecord<T>>, StreamEdge>> allOutputs =
-                new ArrayList<>(4);
+        List<WatermarkGaugeExposingOutput<StreamRecord<T>>> allOutputs = new ArrayList<>(4);
 
         // create collectors for the network outputs
-        for (StreamEdge outputEdge : operatorConfig.getNonChainedOutputs(userCodeClassloader)) {
+        for (NonChainedOutput streamOutput :
+                operatorConfig.getOperatorNonChainedOutputs(userCodeClassloader)) {
             @SuppressWarnings("unchecked")
-            RecordWriterOutput<T> output = (RecordWriterOutput<T>) streamOutputs.get(outputEdge);
+            RecordWriterOutput<T> recordWriterOutput =
+                    (RecordWriterOutput<T>) recordWriterOutputs.get(streamOutput.getDataSetId());
 
-            allOutputs.add(new Tuple2<>(output, outputEdge));
+            allOutputs.add(recordWriterOutput);
         }
 
         // Create collectors for the chained outputs
@@ -628,22 +678,22 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                             chainedOpConfig,
                             chainedConfigs,
                             userCodeClassloader,
-                            streamOutputs,
+                            recordWriterOutputs,
                             allOperatorWrappers,
                             outputEdge.getOutputTag(),
                             mailboxExecutorFactory);
-            allOutputs.add(new Tuple2<>(output, outputEdge));
+            allOutputs.add(output);
         }
 
         if (allOutputs.size() == 1) {
-            return allOutputs.get(0).f0;
+            return allOutputs.get(0);
         } else {
             // send to N outputs. Note that this includes the special case
             // of sending to zero outputs
             @SuppressWarnings({"unchecked"})
             Output<StreamRecord<T>>[] asArray = new Output[allOutputs.size()];
             for (int i = 0; i < allOutputs.size(); i++) {
-                asArray[i] = allOutputs.get(i).f0;
+                asArray[i] = allOutputs.get(i);
             }
 
             // This is the inverse of creating the normal ChainingOutput.
@@ -666,7 +716,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
             StreamConfig operatorConfig,
             Map<Integer, StreamConfig> chainedConfigs,
             ClassLoader userCodeClassloader,
-            Map<StreamEdge, RecordWriterOutput<?>> streamOutputs,
+            Map<IntermediateDataSetID, RecordWriterOutput<?>> recordWriterOutputs,
             List<StreamOperatorWrapper<?, ?>> allOperatorWrappers,
             OutputTag<IN> outputTag,
             MailboxExecutorFactory mailboxExecutorFactory) {
@@ -678,7 +728,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                         operatorConfig,
                         chainedConfigs,
                         userCodeClassloader,
-                        streamOutputs,
+                        recordWriterOutputs,
                         allOperatorWrappers,
                         mailboxExecutorFactory);
 
@@ -789,5 +839,20 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                         .getMailboxExecutorFactory()
                         .createExecutor(operatorConfig.getChainIndex()),
                 isHead);
+    }
+
+    protected void sendAcknowledgeCheckpointEvent(long checkpointId) {
+        if (operatorEventDispatcher == null) {
+            return;
+        }
+
+        operatorEventDispatcher
+                .getRegisteredOperators()
+                .forEach(
+                        x ->
+                                operatorEventDispatcher
+                                        .getOperatorEventGateway(x)
+                                        .sendEventToCoordinator(
+                                                new AcknowledgeCheckpointEvent(checkpointId)));
     }
 }

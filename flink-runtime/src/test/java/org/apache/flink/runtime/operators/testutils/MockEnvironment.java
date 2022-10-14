@@ -46,18 +46,16 @@ import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.metrics.groups.TaskMetricGroup;
 import org.apache.flink.runtime.query.KvStateRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.runtime.state.CheckpointStorageAccess;
 import org.apache.flink.runtime.state.TaskStateManager;
 import org.apache.flink.runtime.taskexecutor.GlobalAggregateManager;
 import org.apache.flink.runtime.taskmanager.NoOpTaskOperatorEventGateway;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
-import org.apache.flink.runtime.throughput.ThroughputCalculator;
 import org.apache.flink.types.Record;
 import org.apache.flink.util.MutableObjectIterator;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.apache.flink.util.concurrent.Executors;
-
-import com.sun.istack.NotNull;
 
 import java.util.Collections;
 import java.util.LinkedList;
@@ -67,6 +65,7 @@ import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
@@ -131,7 +130,7 @@ public class MockEnvironment implements Environment, AutoCloseable {
 
     private ExecutorService asyncOperationsThreadPool;
 
-    private final ThroughputCalculator throughputCalculator;
+    private CheckpointStorageAccess checkpointStorageAccess;
 
     public static MockEnvironmentBuilder builder() {
         return new MockEnvironmentBuilder();
@@ -155,19 +154,17 @@ public class MockEnvironment implements Environment, AutoCloseable {
             TaskMetricGroup taskMetricGroup,
             TaskManagerRuntimeInfo taskManagerRuntimeInfo,
             MemoryManager memManager,
-            ExternalResourceInfoProvider externalResourceInfoProvider,
-            ThroughputCalculator throughputCalculator) {
+            ExternalResourceInfoProvider externalResourceInfoProvider) {
 
         this.jobID = jobID;
         this.jobVertexID = jobVertexID;
-        this.throughputCalculator = throughputCalculator;
 
         this.taskInfo = new TaskInfo(taskName, maxParallelism, subtaskIndex, parallelism, 0);
         this.jobConfiguration = new Configuration();
         this.taskConfiguration = taskConfiguration;
         this.inputs = new LinkedList<>();
         this.outputs = new LinkedList<ResultPartitionWriter>();
-        this.executionAttemptID = new ExecutionAttemptID();
+        this.executionAttemptID = createExecutionAttemptId(jobVertexID, subtaskIndex, 0);
 
         this.memManager = memManager;
         this.ioManager = ioManager;
@@ -318,11 +315,6 @@ public class MockEnvironment implements Environment, AutoCloseable {
     }
 
     @Override
-    public ThroughputCalculator getThroughputCalculator() {
-        return throughputCalculator;
-    }
-
-    @Override
     public JobVertexID getJobVertexId() {
         return jobVertexID;
     }
@@ -411,7 +403,7 @@ public class MockEnvironment implements Environment, AutoCloseable {
     }
 
     @Override
-    public void setMainMailboxExecutor(@NotNull MailboxExecutor mainMailboxExecutor) {
+    public void setMainMailboxExecutor(MailboxExecutor mainMailboxExecutor) {
         this.mainMailboxExecutor = mainMailboxExecutor;
     }
 
@@ -421,13 +413,23 @@ public class MockEnvironment implements Environment, AutoCloseable {
     }
 
     @Override
-    public void setAsyncOperationsThreadPool(@NotNull ExecutorService executorService) {
+    public void setAsyncOperationsThreadPool(ExecutorService executorService) {
         this.asyncOperationsThreadPool = executorService;
     }
 
     @Override
     public ExecutorService getAsyncOperationsThreadPool() {
         return asyncOperationsThreadPool;
+    }
+
+    @Override
+    public void setCheckpointStorageAccess(CheckpointStorageAccess checkpointStorageAccess) {
+        this.checkpointStorageAccess = checkpointStorageAccess;
+    }
+
+    @Override
+    public CheckpointStorageAccess getCheckpointStorageAccess() {
+        return checkNotNull(checkpointStorageAccess);
     }
 
     public void setExpectedExternalFailureCause(Class<? extends Throwable> expectedThrowableClass) {

@@ -17,19 +17,17 @@
 
 package org.apache.flink.connector.kafka.sink;
 
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 
-import org.apache.flink.shaded.guava30.com.google.common.cache.CacheBuilder;
-import org.apache.flink.shaded.guava30.com.google.common.cache.CacheLoader;
-import org.apache.flink.shaded.guava30.com.google.common.cache.LoadingCache;
-
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.Configurable;
 import org.apache.kafka.common.serialization.Serializer;
 
 import javax.annotation.Nullable;
 
+import java.io.Serializable;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.function.Function;
@@ -79,6 +77,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  * @param <IN> type of records to be serialized
  * @see KafkaRecordSerializationSchema#builder()
  */
+@PublicEvolving
 public class KafkaRecordSerializationSchemaBuilder<IN> {
 
     @Nullable private Function<? super IN, String> topicSelector;
@@ -119,7 +118,7 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
      * @return {@code this}
      */
     public <T extends IN> KafkaRecordSerializationSchemaBuilder<T> setTopicSelector(
-            Function<? super T, String> topicSelector) {
+            TopicSelector<? super T> topicSelector) {
         checkState(this.topicSelector == null, "Topic selector already set.");
         KafkaRecordSerializationSchemaBuilder<T> self = self();
         self.topicSelector = new CachingTopicSelector<>(checkNotNull(topicSelector));
@@ -152,7 +151,8 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
             Class<? extends Serializer<? super T>> keySerializer) {
         checkKeySerializerNotSet();
         KafkaRecordSerializationSchemaBuilder<T> self = self();
-        self.keySerializationSchema = new KafkaSerializerWrapper<>(keySerializer, topicSelector);
+        self.keySerializationSchema =
+                new KafkaSerializerWrapper<>(keySerializer, true, topicSelector);
         return self;
     }
 
@@ -160,19 +160,18 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
      * Sets a configurable Kafka {@link Serializer} and pass a configuration to serialize incoming
      * elements to the key of the {@link ProducerRecord}.
      *
-     * @param keySerializerWithConfiguration
+     * @param keySerializer
      * @param configuration
      * @param <S> type of the used serializer class
      * @return {@code this}
      */
-    public <T extends IN, S extends Configurable & Serializer<? super T>>
+    public <T extends IN, S extends Serializer<? super T>>
             KafkaRecordSerializationSchemaBuilder<T> setKafkaKeySerializer(
-                    Class<S> keySerializerWithConfiguration, Map<String, String> configuration) {
+                    Class<S> keySerializer, Map<String, String> configuration) {
         checkKeySerializerNotSet();
         KafkaRecordSerializationSchemaBuilder<T> self = self();
         self.keySerializationSchema =
-                new KafkaSerializerWrapper<>(
-                        keySerializerWithConfiguration, configuration, topicSelector);
+                new KafkaSerializerWrapper<>(keySerializer, true, configuration, topicSelector);
         return self;
     }
 
@@ -208,7 +207,7 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
         checkValueSerializerNotSet();
         KafkaRecordSerializationSchemaBuilder<T> self = self();
         self.valueSerializationSchema =
-                new KafkaSerializerWrapper<>(valueSerializer, topicSelector);
+                new KafkaSerializerWrapper<>(valueSerializer, false, topicSelector);
         return self;
     }
 
@@ -216,19 +215,18 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
      * Sets a configurable Kafka {@link Serializer} and pass a configuration to serialize incoming
      * elements to the value of the {@link ProducerRecord}.
      *
-     * @param valueSerializerWithConfiguration
+     * @param valueSerializer
      * @param configuration
      * @param <S> type of the used serializer class
      * @return {@code this}
      */
-    public <T extends IN, S extends Configurable & Serializer<? super T>>
+    public <T extends IN, S extends Serializer<? super T>>
             KafkaRecordSerializationSchemaBuilder<T> setKafkaValueSerializer(
-                    Class<S> valueSerializerWithConfiguration, Map<String, String> configuration) {
+                    Class<S> valueSerializer, Map<String, String> configuration) {
         checkValueSerializerNotSet();
         KafkaRecordSerializationSchemaBuilder<T> self = self();
         self.valueSerializationSchema =
-                new KafkaSerializerWrapper<>(
-                        valueSerializerWithConfiguration, configuration, topicSelector);
+                new KafkaSerializerWrapper<>(valueSerializer, false, configuration, topicSelector);
         return self;
     }
 
@@ -252,34 +250,25 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
         checkState(keySerializationSchema == null, "Key serializer already set.");
     }
 
-    private static class CachingTopicSelector<IN> implements Function<IN, String> {
+    private static class CachingTopicSelector<IN> implements Function<IN, String>, Serializable {
 
-        private final LoadingCache<IN, String> cache;
+        private static final int CACHE_RESET_SIZE = 5;
+        private final Map<IN, String> cache;
+        private final TopicSelector<IN> topicSelector;
 
-        CachingTopicSelector(Function<IN, String> topicSelector) {
-            this.cache =
-                    CacheBuilder.newBuilder()
-                            .maximumSize(5)
-                            .build(new TopicSelectorCacheLoader<>(topicSelector));
+        CachingTopicSelector(TopicSelector<IN> topicSelector) {
+            this.topicSelector = topicSelector;
+            this.cache = new HashMap<>();
         }
 
         @Override
         public String apply(IN in) {
-            return cache.getUnchecked(in);
-        }
-    }
-
-    private static class TopicSelectorCacheLoader<IN> extends CacheLoader<IN, String> {
-
-        private final Function<IN, String> topicSelector;
-
-        TopicSelectorCacheLoader(Function<IN, String> topicSelector) {
-            this.topicSelector = topicSelector;
-        }
-
-        @Override
-        public String load(IN in) throws Exception {
-            return topicSelector.apply(in);
+            final String topic = cache.getOrDefault(in, topicSelector.apply(in));
+            cache.put(in, topic);
+            if (cache.size() == CACHE_RESET_SIZE) {
+                cache.clear();
+            }
+            return topic;
         }
     }
 
@@ -337,7 +326,11 @@ public class KafkaRecordSerializationSchemaBuilder<IN> {
                             : OptionalInt.empty();
 
             return new ProducerRecord<>(
-                    targetTopic, partition.isPresent() ? partition.getAsInt() : null, key, value);
+                    targetTopic,
+                    partition.isPresent() ? partition.getAsInt() : null,
+                    timestamp == null || timestamp < 0L ? null : timestamp,
+                    key,
+                    value);
         }
     }
 }

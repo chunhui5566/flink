@@ -25,6 +25,7 @@ import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.TaskInvokable;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
@@ -36,6 +37,7 @@ import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -45,6 +47,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkState;
 
 /** Class representing the operators in the streaming programs, with all their properties. */
 @Internal
@@ -65,6 +68,7 @@ public class StreamNode {
     private final Set<ManagedMemoryUseCase> managedMemorySlotScopeUseCases = new HashSet<>();
     private long bufferTimeout;
     private final String operatorName;
+    private String operatorDescription;
     private @Nullable String slotSharingGroup;
     private @Nullable String coLocationGroup;
     private KeySelector<?, ?>[] statePartitioners = new KeySelector[0];
@@ -86,6 +90,8 @@ public class StreamNode {
     private String userHash;
 
     private final Map<Integer, StreamConfig.InputRequirement> inputRequirements = new HashMap<>();
+
+    private @Nullable IntermediateDataSetID consumeClusterDatasetId;
 
     @VisibleForTesting
     public StreamNode(
@@ -113,6 +119,7 @@ public class StreamNode {
             Class<? extends TaskInvokable> jobVertexClass) {
         this.id = id;
         this.operatorName = operatorName;
+        this.operatorDescription = operatorName;
         this.operatorFactory = operatorFactory;
         this.jobVertexClass = jobVertexClass;
         this.slotSharingGroup = slotSharingGroup;
@@ -120,6 +127,11 @@ public class StreamNode {
     }
 
     public void addInEdge(StreamEdge inEdge) {
+        checkState(
+                outEdges.stream().noneMatch(inEdge::equals),
+                "Adding not unique edge = %s to existing outEdges = %s",
+                inEdge,
+                inEdges);
         if (inEdge.getTargetId() != getId()) {
             throw new IllegalArgumentException("Destination id doesn't match the StreamNode id");
         } else {
@@ -128,6 +140,11 @@ public class StreamNode {
     }
 
     public void addOutEdge(StreamEdge outEdge) {
+        checkState(
+                outEdges.stream().noneMatch(outEdge::equals),
+                "Adding not unique edge = %s to existing outEdges = %s",
+                outEdge,
+                outEdges);
         if (outEdge.getSourceId() != getId()) {
             throw new IllegalArgumentException("Source id doesn't match the StreamNode id");
         } else {
@@ -242,17 +259,27 @@ public class StreamNode {
         return operatorName;
     }
 
+    public String getOperatorDescription() {
+        return operatorDescription;
+    }
+
+    public void setOperatorDescription(String operatorDescription) {
+        this.operatorDescription = operatorDescription;
+    }
+
     public void setSerializersIn(TypeSerializer<?>... typeSerializersIn) {
         checkArgument(typeSerializersIn.length > 0);
-        this.typeSerializersIn = typeSerializersIn;
+        // Unfortunately code above assumes type serializer can be null, while users of for example
+        // getTypeSerializersIn would be confused by returning an array size of two with all
+        // elements set to null...
+        this.typeSerializersIn =
+                Arrays.stream(typeSerializersIn)
+                        .filter(typeSerializer -> typeSerializer != null)
+                        .toArray(TypeSerializer<?>[]::new);
     }
 
     public TypeSerializer<?>[] getTypeSerializersIn() {
         return typeSerializersIn;
-    }
-
-    public TypeSerializer<?> getTypeSerializerIn(int index) {
-        return typeSerializersIn[index];
     }
 
     public TypeSerializer<?> getTypeSerializerOut() {
@@ -380,5 +407,15 @@ public class StreamNode {
     @Override
     public int hashCode() {
         return id;
+    }
+
+    @Nullable
+    public IntermediateDataSetID getConsumeClusterDatasetId() {
+        return consumeClusterDatasetId;
+    }
+
+    public void setConsumeClusterDatasetId(
+            @Nullable IntermediateDataSetID consumeClusterDatasetId) {
+        this.consumeClusterDatasetId = consumeClusterDatasetId;
     }
 }

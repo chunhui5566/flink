@@ -16,13 +16,27 @@
  * limitations under the License.
  */
 
-import { ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
-import { Subject } from 'rxjs';
-import { flatMap, takeUntil } from 'rxjs/operators';
-import { deepFind } from 'utils';
-import { VertexTaskManagerDetailInterface } from 'interfaces';
-import { JobService } from 'services';
+import { ChangeDetectorRef, Component, Inject, OnDestroy, OnInit, Type } from '@angular/core';
+import { of, Subject } from 'rxjs';
+import { catchError, map, mergeMap, takeUntil } from 'rxjs/operators';
+
+import { VertexTaskManagerDetail } from '@flink-runtime-web/interfaces';
+import {
+  JOB_OVERVIEW_MODULE_CONFIG,
+  JOB_OVERVIEW_MODULE_DEFAULT_CONFIG,
+  JobOverviewModuleConfig
+} from '@flink-runtime-web/pages/job/overview/job-overview.config';
+import { JobService } from '@flink-runtime-web/services';
+import { typeDefinition } from '@flink-runtime-web/utils/strong-type';
 import { NzTableSortFn } from 'ng-zorro-antd/table/src/table.types';
+
+import { JobLocalService } from '../../job-local.service';
+
+function createSortFn(
+  selector: (item: VertexTaskManagerDetail) => number | string
+): NzTableSortFn<VertexTaskManagerDetail> {
+  return (pre, next) => (selector(pre) > selector(next) ? 1 : -1);
+}
 
 @Component({
   selector: 'flink-job-overview-drawer-taskmanagers',
@@ -30,54 +44,65 @@ import { NzTableSortFn } from 'ng-zorro-antd/table/src/table.types';
   styleUrls: ['./job-overview-drawer-taskmanagers.component.less']
 })
 export class JobOverviewDrawerTaskmanagersComponent implements OnInit, OnDestroy {
-  listOfTaskManager: VertexTaskManagerDetailInterface[] = [];
-  destroy$ = new Subject();
-  sortName: string;
-  sortValue: string;
-  isLoading = true;
+  public readonly trackByHost = (_: number, node: VertexTaskManagerDetail): string => node.host;
 
-  sortReadBytesFn = this.sortFn('metrics.read-bytes');
-  sortReadRecordsFn = this.sortFn('metrics.read-records');
-  sortWriteBytesFn = this.sortFn('metrics.write-bytes');
-  sortWriteRecordsFn = this.sortFn('metrics.write-records');
-  sortAttemptFn = this.sortFn('attempt');
-  sortHostFn = this.sortFn('host');
-  sortStartTimeFn = this.sortFn('detail.start-time');
-  sortDurationFn = this.sortFn('detail.duration');
-  sortEndTimeFn = this.sortFn('detail.end-time');
-  sortStatusFn = this.sortFn('status');
+  public readonly sortReadBytesFn = createSortFn(item => item.metrics?.['read-bytes']);
+  public readonly sortReadRecordsFn = createSortFn(item => item.metrics?.['read-records']);
+  public readonly sortWriteBytesFn = createSortFn(item => item.metrics?.['write-bytes']);
+  public readonly sortWriteRecordsFn = createSortFn(item => item.metrics?.['write-records']);
+  public readonly sortHostFn = createSortFn(item => item.host);
+  public readonly sortStartTimeFn = createSortFn(item => item['start-time']);
+  public readonly sortDurationFn = createSortFn(item => item.duration);
+  public readonly sortEndTimeFn = createSortFn(item => item['end-time']);
+  public readonly sortStatusFn = createSortFn(item => item.status);
 
-  sortFn(path: string): NzTableSortFn<VertexTaskManagerDetailInterface> {
-    return (pre: VertexTaskManagerDetailInterface, next: VertexTaskManagerDetailInterface) =>
-      deepFind(pre, path) > deepFind(next, path) ? 1 : -1;
+  public listOfTaskManager: VertexTaskManagerDetail[] = [];
+  public isLoading = true;
+  public virtualItemSize = 36;
+  public actionComponent: Type<unknown>;
+  public taskCountBadgeComponent: Type<unknown>;
+  public stateBadgeComponent: Type<unknown>;
+  public readonly narrowLogData = typeDefinition<VertexTaskManagerDetail>();
+
+  private readonly destroy$ = new Subject<void>();
+
+  constructor(
+    private readonly jobService: JobService,
+    private readonly jobLocalService: JobLocalService,
+    private readonly cdr: ChangeDetectorRef,
+    @Inject(JOB_OVERVIEW_MODULE_CONFIG) readonly moduleConfig: JobOverviewModuleConfig
+  ) {
+    this.actionComponent =
+      moduleConfig.customComponents?.taskManagerActionComponent ||
+      JOB_OVERVIEW_MODULE_DEFAULT_CONFIG.customComponents.taskManagerActionComponent;
+    this.taskCountBadgeComponent =
+      moduleConfig.customComponents?.taskCountBadgeComponent ||
+      JOB_OVERVIEW_MODULE_DEFAULT_CONFIG.customComponents.taskCountBadgeComponent;
+    this.stateBadgeComponent =
+      moduleConfig.customComponents?.stateBadgeComponent ||
+      JOB_OVERVIEW_MODULE_DEFAULT_CONFIG.customComponents.stateBadgeComponent;
   }
 
-  trackTaskManagerBy(_: number, node: VertexTaskManagerDetailInterface) {
-    return node.host;
-  }
-
-  constructor(private jobService: JobService, private cdr: ChangeDetectorRef) {}
-
-  ngOnInit() {
-    this.jobService.jobWithVertex$
+  ngOnInit(): void {
+    this.jobLocalService
+      .jobWithVertexChanges()
       .pipe(
-        takeUntil(this.destroy$),
-        flatMap(data => this.jobService.loadTaskManagers(data.job.jid, data.vertex!.id))
+        mergeMap(data =>
+          this.jobService.loadTaskManagers(data.job.jid, data.vertex!.id).pipe(
+            map(data => data.taskmanagers),
+            catchError(() => of([]))
+          )
+        ),
+        takeUntil(this.destroy$)
       )
-      .subscribe(
-        data => {
-          this.listOfTaskManager = data.taskmanagers;
-          this.isLoading = false;
-          this.cdr.markForCheck();
-        },
-        () => {
-          this.isLoading = false;
-          this.cdr.markForCheck();
-        }
-      );
+      .subscribe(taskmanagers => {
+        this.listOfTaskManager = taskmanagers;
+        this.isLoading = false;
+        this.cdr.markForCheck();
+      });
   }
 
-  ngOnDestroy() {
+  ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
   }

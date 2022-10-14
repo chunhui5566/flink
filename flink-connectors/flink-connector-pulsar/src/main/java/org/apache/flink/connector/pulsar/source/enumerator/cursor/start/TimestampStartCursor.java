@@ -20,20 +20,19 @@ package org.apache.flink.connector.pulsar.source.enumerator.cursor.start;
 
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.CursorPosition;
 import org.apache.flink.connector.pulsar.source.enumerator.cursor.StartCursor;
-import org.apache.flink.connector.pulsar.source.split.PulsarPartitionSplit;
 
-/** This cursor would left pulsar start consuming from a specific timestamp. */
+/** This cursor would left pulsar start consuming from a specific publish timestamp. */
 public class TimestampStartCursor implements StartCursor {
     private static final long serialVersionUID = 5170578885838095320L;
 
     private final long timestamp;
 
-    public TimestampStartCursor(long timestamp) {
-        this.timestamp = timestamp;
+    public TimestampStartCursor(long timestamp, boolean inclusive) {
+        this.timestamp = inclusive ? timestamp : timestamp + 1;
     }
 
     @Override
-    public CursorPosition position(PulsarPartitionSplit split) {
+    public CursorPosition position(String topic, int partitionId) {
         return new CursorPosition(timestamp);
     }
 }

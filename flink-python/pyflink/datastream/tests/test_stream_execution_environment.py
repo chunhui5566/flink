@@ -18,30 +18,26 @@
 import datetime
 import decimal
 import glob
-import json
 import os
 import shutil
 import tempfile
 import time
-import unittest
 import uuid
 
-from pyflink.common import ExecutionConfig, RestartStrategies
-from pyflink.common.serialization import JsonRowDeserializationSchema
+from pyflink.common import Configuration, ExecutionConfig, RestartStrategies
 from pyflink.common.typeinfo import Types
 from pyflink.datastream import (StreamExecutionEnvironment, CheckpointConfig,
                                 CheckpointingMode, MemoryStateBackend, TimeCharacteristic,
                                 SlotSharingGroup)
-from pyflink.datastream.connectors import FlinkKafkaConsumer
+from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer
 from pyflink.datastream.execution_mode import RuntimeExecutionMode
+from pyflink.datastream.formats.json import JsonRowDeserializationSchema
 from pyflink.datastream.functions import SourceFunction
 from pyflink.datastream.slot_sharing_group import MemorySize
 from pyflink.datastream.tests.test_util import DataStreamTestSinkFunction
 from pyflink.find_flink_home import _find_flink_source_root
 from pyflink.java_gateway import get_gateway
-from pyflink.pyflink_gateway_server import on_windows
-from pyflink.table import DataTypes, CsvTableSource, CsvTableSink, StreamTableEnvironment, \
-    EnvironmentSettings
+from pyflink.table import DataTypes, StreamTableEnvironment, EnvironmentSettings
 from pyflink.testing.test_case_utils import PyFlinkTestCase, exec_insert_table
 from pyflink.util.java_utils import get_j_env_configuration
 
@@ -49,15 +45,11 @@ from pyflink.util.java_utils import get_j_env_configuration
 class StreamExecutionEnvironmentTests(PyFlinkTestCase):
 
     def setUp(self):
-        self.env = self.create_new_env()
-        self.env._remote_mode = True
+        os.environ['_python_worker_execution_mode'] = "loopback"
+        self.env = StreamExecutionEnvironment.get_execution_environment()
+        os.environ['_python_worker_execution_mode'] = "process"
+        self.env.set_parallelism(2)
         self.test_sink = DataStreamTestSinkFunction()
-
-    @staticmethod
-    def create_new_env():
-        env = StreamExecutionEnvironment.get_execution_environment()
-        env.set_parallelism(2)
-        return env
 
     def test_get_config(self):
         execution_config = self.env.get_config()
@@ -184,6 +176,19 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         self.assertEqual(output_backend._j_memory_state_backend,
                          input_backend._j_memory_state_backend)
 
+    def test_is_changelog_state_backend_enabled(self):
+        self.assertIsNone(self.env.is_changelog_state_backend_enabled())
+
+    def test_enable_changelog_state_backend(self):
+
+        self.env.enable_changelog_state_backend(True)
+
+        self.assertTrue(self.env.is_changelog_state_backend_enabled())
+
+        self.env.enable_changelog_state_backend(False)
+
+        self.assertFalse(self.env.is_changelog_state_backend_enabled())
+
     def test_get_set_stream_time_characteristic(self):
         default_time_characteristic = self.env.get_stream_time_characteristic()
 
@@ -195,35 +200,35 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
 
         self.assertEqual(time_characteristic, TimeCharacteristic.ProcessingTime)
 
-    @unittest.skip("Python API does not support DataStream now. refactor this test later")
-    def test_get_execution_plan(self):
-        tmp_dir = tempfile.gettempdir()
-        source_path = os.path.join(tmp_dir + '/streaming.csv')
-        tmp_csv = os.path.join(tmp_dir + '/streaming2.csv')
-        field_names = ["a", "b", "c"]
-        field_types = [DataTypes.INT(), DataTypes.STRING(), DataTypes.STRING()]
-
-        t_env = StreamTableEnvironment.create(self.env)
-        csv_source = CsvTableSource(source_path, field_names, field_types)
-        t_env.register_table_source("Orders", csv_source)
-        t_env.register_table_sink(
-            "Results",
-            CsvTableSink(field_names, field_types, tmp_csv))
-        t_env.from_path("Orders").execute_insert("Results").wait()
-
-        plan = self.env.get_execution_plan()
-
-        json.loads(plan)
+    def test_configure(self):
+        configuration = Configuration()
+        configuration.set_string('pipeline.operator-chaining', 'false')
+        configuration.set_string('pipeline.time-characteristic', 'IngestionTime')
+        configuration.set_string('execution.buffer-timeout', '1 min')
+        configuration.set_string('execution.checkpointing.timeout', '12000')
+        configuration.set_string('state.backend', 'jobmanager')
+        self.env.configure(configuration)
+        self.assertEqual(self.env.is_chaining_enabled(), False)
+        self.assertEqual(self.env.get_stream_time_characteristic(),
+                         TimeCharacteristic.IngestionTime)
+        self.assertEqual(self.env.get_buffer_timeout(), 60000)
+        self.assertEqual(self.env.get_checkpoint_config().get_checkpoint_timeout(), 12000)
+        self.assertTrue(isinstance(self.env.get_state_backend(), MemoryStateBackend))
 
     def test_execute(self):
         tmp_dir = tempfile.gettempdir()
-        field_names = ['a', 'b', 'c']
-        field_types = [DataTypes.BIGINT(), DataTypes.STRING(), DataTypes.STRING()]
         t_env = StreamTableEnvironment.create(self.env)
-        t_env.register_table_sink(
-            'Results',
-            CsvTableSink(field_names, field_types,
-                         os.path.join('{}/{}.csv'.format(tmp_dir, round(time.time())))))
+        t_env.execute_sql("""
+            CREATE TABLE Results (
+                a BIGINT,
+                b STRING,
+                c STRING
+            ) WITH (
+                'connector' = 'filesystem',
+                'path'='{0}/{1}.csv',
+                'format' = 'csv'
+            )
+        """.format(tmp_dir, round(time.time())))
         execution_result = exec_insert_table(
             t_env.from_elements([(1, 'Hi', 'Hello')], ['a', 'b', 'c']),
             'Results')
@@ -343,7 +348,7 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
 
     def test_add_python_file(self):
         import uuid
-        env = self.create_new_env()
+        env = self.env
         python_file_dir = os.path.join(self.tempdir, "python_file_dir_" + str(uuid.uuid4()))
         os.mkdir(python_file_dir)
         python_file_path = os.path.join(python_file_dir, "test_dep1.py")
@@ -380,7 +385,7 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         from pyflink.table.expressions import col
         add_three = udf(plus_three, result_type=DataTypes.BIGINT())
 
-        tab = t_env.from_data_stream(ds, 'a') \
+        tab = t_env.from_data_stream(ds, col('a')) \
                    .select(add_three(col('a')))
         t_env.to_append_stream(tab, Types.ROW([Types.LONG()])) \
              .map(lambda i: i[0]) \
@@ -394,7 +399,7 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
 
     def test_add_python_file_2(self):
         import uuid
-        env = self.create_new_env()
+        env = self.env
         python_file_dir = os.path.join(self.tempdir, "python_file_dir_" + str(uuid.uuid4()))
         os.mkdir(python_file_dir)
         python_file_path = os.path.join(python_file_dir, "test_dep1.py")
@@ -422,16 +427,16 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
             from test_dep2 import add_three
             return add_three(value)
 
+        env.add_python_file(python_file_path)
         t_env = StreamTableEnvironment.create(
             stream_execution_environment=env,
             environment_settings=EnvironmentSettings.in_streaming_mode())
-        env.add_python_file(python_file_path)
 
         from pyflink.table.udf import udf
         from pyflink.table.expressions import col
         add_three = udf(plus_three, result_type=DataTypes.BIGINT())
 
-        tab = t_env.from_data_stream(ds, 'a') \
+        tab = t_env.from_data_stream(ds, col('a')) \
                    .select(add_three(col('a')))
         result = [i[0] for i in tab.execute().collect()]
         expected = [6, 7, 8, 9, 10]
@@ -443,7 +448,7 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         import uuid
         requirements_txt_path = os.path.join(self.tempdir, str(uuid.uuid4()))
         with open(requirements_txt_path, 'w') as f:
-            f.write("cloudpickle==1.2.2")
+            f.write("cloudpickle==2.1.0")
         self.env.set_python_requirements(requirements_txt_path)
 
         def check_requirements(i):
@@ -462,7 +467,7 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
     def test_set_requirements_with_cached_directory(self):
         import uuid
         tmp_dir = self.tempdir
-        env = self.create_new_env()
+        env = self.env
         requirements_txt_path = os.path.join(tmp_dir, "requirements_txt_" + str(uuid.uuid4()))
         with open(requirements_txt_path, 'w') as f:
             f.write("python-package1==0.0.0")
@@ -508,7 +513,7 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         import uuid
         import shutil
         tmp_dir = self.tempdir
-        env = self.create_new_env()
+        env = self.env
         archive_dir_path = os.path.join(tmp_dir, "archive_" + str(uuid.uuid4()))
         os.mkdir(archive_dir_path)
         with open(os.path.join(archive_dir_path, "data.txt"), 'w') as f:
@@ -530,14 +535,10 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         expected.sort()
         self.assertEqual(expected, result)
 
-    @unittest.skipIf(on_windows(), "Symbolic link is not supported on Windows, skipping.")
     def test_set_stream_env(self):
         import sys
-        python_exec = sys.executable
-        tmp_dir = self.tempdir
-        env = self.create_new_env()
-        python_exec_link_path = os.path.join(tmp_dir, "py_exec")
-        os.symlink(python_exec, python_exec_link_path)
+        env = self.env
+        python_exec_link_path = sys.executable
         env.set_python_executable(python_exec_link_path)
 
         def check_python_exec(i):
@@ -599,12 +600,11 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
 
     def test_generate_stream_graph_with_dependencies(self):
         python_file_dir = os.path.join(self.tempdir, "python_file_dir_" + str(uuid.uuid4()))
-        env = self.create_new_env()
-        env._remote_mode = True
         os.mkdir(python_file_dir)
         python_file_path = os.path.join(python_file_dir, "test_stream_dependency_manage_lib.py")
         with open(python_file_path, 'w') as f:
             f.write("def add_two(a):\n    return a + 2")
+        env = self.env
         env.add_python_file(python_file_path)
 
         def plus_two_map(value):
@@ -660,13 +660,15 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         # The parallelism of Sink: Test Sink should be 4
         self.assertEqual(nodes[4]['parallelism'], 4)
 
-        env_config_with_dependencies = dict(get_gateway().jvm.org.apache.flink.python.util
-                                            .PythonConfigUtil.getEnvConfigWithDependencies(
-            env._j_stream_execution_environment).toMap())
+        python_dependency_config = dict(
+            get_gateway().jvm.org.apache.flink.python.util.PythonDependencyUtils.
+            configurePythonDependencies(
+                env._j_stream_execution_environment.getCachedFiles(),
+                env._j_stream_execution_environment.getConfiguration()).toMap())
 
         # Make sure that user specified files and archives are correctly added.
-        self.assertIsNotNone(env_config_with_dependencies['python.files'])
-        self.assertIsNotNone(env_config_with_dependencies['python.archives'])
+        self.assertIsNotNone(python_dependency_config['python.internal.files-key-map'])
+        self.assertIsNotNone(python_dependency_config['python.internal.archives-key-map'])
 
     def test_register_slot_sharing_group(self):
         slot_sharing_group_1 = SlotSharingGroup.builder('slot_sharing_group_1') \
@@ -698,6 +700,18 @@ class StreamExecutionEnvironmentTests(PyFlinkTestCase):
         self.assertEqual(MemorySize(j_memory_size=j_resource_profile_2.getTaskHeapMemory()),
                          MemorySize.of_mebi_bytes(200))
         self.assertFalse(j_resource_profile_3.isPresent())
+
+    def test_register_cached_file(self):
+        texts = ['machen', 'zeit', 'heerscharen', 'keiner', 'meine']
+        text_path = self.tempdir + '/text_file'
+        with open(text_path, 'a') as f:
+            for text in texts:
+                f.write(text)
+                f.write('\n')
+        self.env.register_cached_file(text_path, 'cache_test')
+        cached_files = self.env._j_stream_execution_environment.getCachedFiles()
+        self.assertEqual(cached_files.size(), 1)
+        self.assertEqual(cached_files[0].getField(0), 'cache_test')
 
     def tearDown(self) -> None:
         self.test_sink.clear()

@@ -70,7 +70,7 @@ $ kubectl delete deployment/my-first-flink-cluster
 ```
 
 {{< hint info >}}
-When using [Minikube](https://minikube.sigs.k8s.io/docs/), you need to call `minikube tunnel` in order to [expose Flink's LoadBalancer service on Minikube](https://minikube.sigs.k8s.io/docs/handbook/accessing/#using-minikube-tunnel).
+In default, Flink’s Web UI and REST endpoint are exposed as `ClusterIP` service. To access the service, please refer to [Accessing Flink’s Web UI](#accessing-flinks-web-ui) for instructions.
 {{< /hint >}}
 
 Congratulations! You have successfully run a Flink application by deploying Flink on Kubernetes.
@@ -82,6 +82,10 @@ Congratulations! You have successfully run a Flink application by deploying Flin
 For production use, we recommend deploying Flink Applications in the [Application Mode]({{< ref "docs/deployment/overview" >}}#application-mode), as these modes provide a better isolation for the Applications.
 
 ### Application Mode
+
+{{< hint info >}}
+For high-level intuition behind the application mode, please refer to the [deployment mode overview]({{< ref "docs/deployment/overview#application-mode" >}}).
+{{< /hint >}}
 
 The [Application Mode]({{< ref "docs/deployment/overview" >}}#application-mode) requires that the user code is bundled together with the Flink image because it runs the user code's `main()` method on the cluster.
 The Application Mode makes sure that all Flink components are properly cleaned up after the termination of the application.
@@ -100,7 +104,7 @@ After creating and publishing the Docker image under `custom-image-name`, you ca
 $ ./bin/flink run-application \
     --target kubernetes-application \
     -Dkubernetes.cluster-id=my-first-application-cluster \
-    -Dkubernetes.container.image=custom-image-name \
+    -Dkubernetes.container.image.ref=custom-image-name \
     local:///opt/flink/usrlib/my-flink-job.jar
 ```
 
@@ -109,7 +113,7 @@ $ ./bin/flink run-application \
 The `kubernetes.cluster-id` option specifies the cluster name and must be unique.
 If you do not specify this option, then Flink will generate a random name.
 
-The `kubernetes.container.image` option specifies the image to start the pods with.
+The `kubernetes.container.image.ref` option specifies the image to start the pods with.
 
 Once the application cluster is deployed you can interact with it:
 
@@ -122,11 +126,11 @@ $ ./bin/flink cancel --target kubernetes-application -Dkubernetes.cluster-id=my-
 
 You can override configurations set in `conf/flink-conf.yaml` by passing key-value pairs `-Dkey=value` to `bin/flink`.
 
-### Per-Job Cluster Mode
-
-Flink on Kubernetes does not support Per-Job Cluster Mode.
-
 ### Session Mode
+
+{{< hint info >}}
+For high-level intuition behind the session mode, please refer to the [deployment mode overview]({{< ref "docs/deployment/overview#session-mode" >}}).
+{{< /hint >}}
 
 You have seen the deployment of a Session cluster in the [Getting Started](#getting-started) guide at the top of this page.
 
@@ -247,7 +251,7 @@ $ ./bin/kubernetes-session.sh
 
 ### Custom Docker Image
 
-If you want to use a custom Docker image, then you can specify it via the configuration option `kubernetes.container.image`.
+If you want to use a custom Docker image, then you can specify it via the configuration option `kubernetes.container.image.ref`.
 The Flink community provides a rich [Flink Docker image]({{< ref "docs/deployment/resource-providers/standalone/docker" >}}) which can be a good starting point.
 See [how to customize Flink's Docker image]({{< ref "docs/deployment/resource-providers/standalone/docker" >}}#customize-flink-image) for how to enable plugins, add dependencies and other options.
 
@@ -340,7 +344,7 @@ Please refer to the official Kubernetes documentation on [RBAC Authorization](ht
 
 Flink allows users to define the JobManager and TaskManager pods via template files. This allows to support advanced features
 that are not supported by Flink [Kubernetes config options]({{< ref "docs/deployment/config" >}}#kubernetes) directly.
-Use [`kubernetes.pod-template-file`]({{< ref "docs/deployment/config" >}}#kubernetes-pod-template-file)
+Use [`kubernetes.pod-template-file.default`]({{< ref "docs/deployment/config" >}}#kubernetes-pod-template-file)
 to specify a local file that contains the pod definition. It will be used to initialize the JobManager and TaskManager.
 The main container should be defined with name `flink-main-container`.
 Please refer to the [pod template example](#example-of-pod-template) for more information.
@@ -481,7 +485,7 @@ All the fields defined in the pod template that are not listed in the tables wil
         <tr>
             <td>image</td>
             <td>Defined by the user</td>
-            <td><a href="{{< ref "docs/deployment/config" >}}#kubernetes-container-image">kubernetes.container.image</a></td>
+            <td><a href="{{< ref "docs/deployment/config" >}}#kubernetes-container-image">kubernetes.container.image.ref</a></td>
             <td>The container image will be resolved with respect to the defined precedence order for user defined values.</td>
         </tr>
         <tr>
@@ -533,7 +537,7 @@ metadata:
 spec:
   initContainers:
     - name: artifacts-fetcher
-      image: artifacts-fetcher:latest
+      image: busybox:latest
       # Use wget or other tools to get user jars from remote storage
       command: [ 'wget', 'https://path/of/StateMachineExample.jar', '-O', '/flink-artifact/myjob.jar' ]
       volumeMounts:
@@ -571,5 +575,13 @@ spec:
     - name: flink-logs
       emptyDir: { }
 ```
+
+### User jars & Classpath
+
+When deploying Flink natively on Kubernetes, the following jars will be recognized as user-jars and included into user classpath:
+- Session Mode: The JAR file specified in startup command.
+- Application Mode: The JAR file specified in startup command and all JAR files in Flink's `usrlib` folder.
+
+Please refer to the [Debugging Classloading Docs]({{< ref "docs/ops/debugging/debugging_classloading" >}}#overview-of-classloading-in-flink) for details.
 
 {{< top >}}

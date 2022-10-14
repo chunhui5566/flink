@@ -21,14 +21,13 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.StateObjectCollection;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
+import org.apache.flink.runtime.io.network.api.StopMode;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriterDelegate;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.plugable.SerializationDelegate;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
-import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.streaming.api.operators.OperatorSnapshotFutures;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamTaskStateInitializer;
@@ -40,8 +39,6 @@ import org.apache.flink.util.SerializedValue;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.List;
@@ -73,7 +70,7 @@ public class RegularOperatorChain<OUT, OP extends StreamOperator<OUT>>
     }
 
     @Override
-    public boolean isFinishedOnRestore() {
+    public boolean isTaskDeployedAsFinished() {
         return false;
     }
 
@@ -112,9 +109,10 @@ public class RegularOperatorChain<OUT, OP extends StreamOperator<OUT>>
     }
 
     @Override
-    public void finishOperators(StreamTaskActionExecutor actionExecutor) throws Exception {
+    public void finishOperators(StreamTaskActionExecutor actionExecutor, StopMode stopMode)
+            throws Exception {
         if (firstOperatorWrapper != null) {
-            firstOperatorWrapper.finish(actionExecutor);
+            firstOperatorWrapper.finish(actionExecutor, stopMode);
         }
     }
 
@@ -137,11 +135,6 @@ public class RegularOperatorChain<OUT, OP extends StreamOperator<OUT>>
     @Override
     public void close() throws IOException {
         super.close();
-    }
-
-    @Nullable
-    StreamOperator<?> getTailOperator() {
-        return (tailOperatorWrapper == null) ? null : tailOperatorWrapper.getStreamOperator();
     }
 
     @Override
@@ -171,6 +164,19 @@ public class RegularOperatorChain<OUT, OP extends StreamOperator<OUT>>
     }
 
     @Override
+    public void notifyCheckpointSubsumed(long checkpointId) throws Exception {
+        Exception previousException = null;
+        for (StreamOperatorWrapper<?, ?> operatorWrapper : getAllOperators(true)) {
+            try {
+                operatorWrapper.notifyCheckpointSubsumed(checkpointId);
+            } catch (Exception e) {
+                previousException = ExceptionUtils.firstOrSuppressed(e, previousException);
+            }
+        }
+        ExceptionUtils.tryRethrowException(previousException);
+    }
+
+    @Override
     public void snapshotState(
             Map<OperatorID, OperatorSnapshotFutures> operatorSnapshotsInProgress,
             CheckpointMetaData checkpointMetaData,
@@ -192,6 +198,7 @@ public class RegularOperatorChain<OUT, OP extends StreamOperator<OUT>>
                                 storage));
             }
         }
+        sendAcknowledgeCheckpointEvent(checkpointMetaData.getCheckpointId());
     }
 
     private OperatorSnapshotFutures buildOperatorSnapshotFutures(
@@ -205,20 +212,8 @@ public class RegularOperatorChain<OUT, OP extends StreamOperator<OUT>>
         OperatorSnapshotFutures snapshotInProgress =
                 checkpointStreamOperator(
                         op, checkpointMetaData, checkpointOptions, storage, isRunning);
-        if (op == getMainOperator()) {
-            snapshotInProgress.setInputChannelStateFuture(
-                    channelStateWriteResult
-                            .getInputChannelStateHandles()
-                            .thenApply(StateObjectCollection::new)
-                            .thenApply(SnapshotResult::of));
-        }
-        if (op == getTailOperator()) {
-            snapshotInProgress.setResultSubpartitionStateFuture(
-                    channelStateWriteResult
-                            .getResultSubpartitionStateHandles()
-                            .thenApply(StateObjectCollection::new)
-                            .thenApply(SnapshotResult::of));
-        }
+        snapshotChannelStates(op, channelStateWriteResult, snapshotInProgress);
+
         return snapshotInProgress;
     }
 

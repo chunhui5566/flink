@@ -31,10 +31,12 @@ import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.event.AbstractEvent;
 import org.apache.flink.runtime.execution.CancelTaskException;
 import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.io.network.api.EndOfData;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
+import org.apache.flink.runtime.io.network.api.StopMode;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.consumer.StreamTestSingleInputGate;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.memory.MemoryManager;
@@ -50,8 +52,8 @@ import org.apache.flink.runtime.state.TestTaskStateManager;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.streaming.api.TimeCharacteristic;
+import org.apache.flink.streaming.api.graph.NonChainedOutput;
 import org.apache.flink.streaming.api.graph.StreamConfig;
-import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.graph.StreamNode;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
@@ -80,6 +82,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
@@ -151,7 +154,6 @@ public class StreamTaskTestHarness<OUT> {
                 taskFactory,
                 outputType,
                 new LocalRecoveryConfig(
-                        true,
                         new LocalRecoveryDirectoryProviderImpl(
                                 localRootDir, new JobID(), new JobVertexID(), 0)));
     }
@@ -237,24 +239,27 @@ public class StreamTaskTestHarness<OUT> {
                     private static final long serialVersionUID = 1L;
                 };
 
-        List<StreamEdge> outEdgesInOrder = new LinkedList<>();
+        List<NonChainedOutput> streamOutputs = new LinkedList<>();
         StreamNode sourceVertexDummy =
                 new StreamNode(
                         0, "group", null, dummyOperator, "source dummy", SourceStreamTask.class);
-        StreamNode targetVertexDummy =
-                new StreamNode(
-                        1, "group", null, dummyOperator, "target dummy", SourceStreamTask.class);
 
-        outEdgesInOrder.add(
-                new StreamEdge(
-                        sourceVertexDummy,
-                        targetVertexDummy,
-                        0,
+        streamOutputs.add(
+                new NonChainedOutput(
+                        true,
+                        sourceVertexDummy.getId(),
+                        1,
+                        1,
+                        100,
+                        false,
+                        new IntermediateDataSetID(),
+                        null,
                         new BroadcastPartitioner<>(),
-                        null /* output tag */));
+                        ResultPartitionType.PIPELINED_BOUNDED));
 
-        streamConfig.setOutEdgesInOrder(outEdgesInOrder);
-        streamConfig.setNonChainedOutputs(outEdgesInOrder);
+        streamConfig.setVertexNonChainedOutputs(streamOutputs);
+        streamConfig.setOperatorNonChainedOutputs(streamOutputs);
+        streamConfig.serializeAllConfigs();
     }
 
     public StreamMockEnvironment createEnvironment() {
@@ -280,6 +285,7 @@ public class StreamTaskTestHarness<OUT> {
      * thread to finish running.
      */
     public Thread invoke() throws Exception {
+        streamConfig.serializeAllConfigs();
         return invoke(createEnvironment());
     }
 
@@ -295,6 +301,7 @@ public class StreamTaskTestHarness<OUT> {
 
         initializeInputs();
         initializeOutput();
+        streamConfig.serializeAllConfigs();
 
         taskThread = new TaskThread(() -> taskFactory.apply(mockEnv));
         taskThread.start();
@@ -324,18 +331,22 @@ public class StreamTaskTestHarness<OUT> {
      *
      * @param timeout Timeout for the task completion
      */
-    public void waitForTaskCompletion(long timeout, boolean ignoreCancellationException)
-            throws Exception {
+    public void waitForTaskCompletion(
+            long timeout, boolean ignoreCancellationOrInterruptedException) throws Exception {
         Preconditions.checkState(taskThread != null, "Task thread was not started.");
 
         taskThread.join(timeout);
         if (taskThread.getError() != null) {
-            if (!ignoreCancellationException
-                    || !ExceptionUtils.findThrowable(
-                                    taskThread.getError(), CancelTaskException.class)
-                            .isPresent()) {
-                throw new Exception("error in task", taskThread.getError());
+            boolean errorIsCancellationOrInterrupted =
+                    ExceptionUtils.findThrowable(taskThread.getError(), CancelTaskException.class)
+                                    .isPresent()
+                            || ExceptionUtils.findThrowable(
+                                            taskThread.getError(), InterruptedException.class)
+                                    .isPresent();
+            if (ignoreCancellationOrInterruptedException && errorIsCancellationOrInterrupted) {
+                return;
             }
+            throw new Exception("error in task", taskThread.getError());
         }
     }
 
@@ -358,6 +369,10 @@ public class StreamTaskTestHarness<OUT> {
 
     public StreamTask<OUT, ?> getTask() {
         return taskThread.task;
+    }
+
+    public Thread getTaskThread() {
+        return taskThread;
     }
 
     /**
@@ -484,7 +499,7 @@ public class StreamTaskTestHarness<OUT> {
 
     public void endInput(int gateIndex, int channelIndex, boolean emitEndOfData) {
         if (emitEndOfData) {
-            inputGates[gateIndex].sendEvent(EndOfData.INSTANCE, channelIndex);
+            inputGates[gateIndex].sendEvent(new EndOfData(StopMode.DRAIN), channelIndex);
         }
         inputGates[gateIndex].sendEvent(EndOfPartitionEvent.INSTANCE, channelIndex);
     }
@@ -500,6 +515,7 @@ public class StreamTaskTestHarness<OUT> {
         setupCalled = true;
         StreamConfig streamConfig = getStreamConfig();
         streamConfig.setStreamOperatorFactory(headOperatorFactory);
+        streamConfig.serializeAllConfigs();
         return new StreamConfigChainer(headOperatorId, streamConfig, this, 1);
     }
 
@@ -524,8 +540,18 @@ public class StreamTaskTestHarness<OUT> {
                 task.invoke();
                 shutdownIOManager();
                 shutdownMemoryManager();
-            } catch (Throwable t) {
-                this.error = t;
+            } catch (Throwable throwable) {
+                this.error = throwable;
+            } finally {
+                try {
+                    task.cleanUp(this.error);
+                } catch (Exception cleanUpException) {
+                    if (this.error == null) {
+                        this.error = cleanUpException;
+                    } else {
+                        this.error.addSuppressed(cleanUpException);
+                    }
+                }
             }
         }
 
@@ -537,14 +563,8 @@ public class StreamTaskTestHarness<OUT> {
     static TaskMetricGroup createTaskMetricGroup(Map<String, Metric> metrics) {
         return TaskManagerMetricGroup.createTaskManagerMetricGroup(
                         new TestMetricRegistry(metrics), "localhost", ResourceID.generate())
-                .addTaskForJob(
-                        new JobID(),
-                        "jobName",
-                        new JobVertexID(0, 0),
-                        new ExecutionAttemptID(),
-                        "test",
-                        0,
-                        0);
+                .addJob(new JobID(), "jobName")
+                .addTask(createExecutionAttemptId(), "test");
     }
 
     /** The metric registry for storing the registered metrics to verify in tests. */

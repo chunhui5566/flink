@@ -57,6 +57,8 @@ public class TopicRange implements Serializable {
     public TopicRange(int start, int end) {
         checkArgument(start >= MIN_RANGE, "Start range %s shouldn't below zero.", start);
         checkArgument(end <= MAX_RANGE, "End range %s shouldn't exceed 65535.", end);
+        checkArgument(start <= end, "Range end must >= range start.");
+
         this.start = start;
         this.end = end;
     }
@@ -66,7 +68,7 @@ public class TopicRange implements Serializable {
         return new Range(start, end);
     }
 
-    /** Create a topic range which contains the fully hash range. */
+    /** Create a topic range which contains the full hash range. */
     public static TopicRange createFullRange() {
         return new TopicRange(MIN_RANGE, MAX_RANGE);
     }

@@ -31,6 +31,11 @@ import static org.apache.flink.configuration.description.TextElement.text;
 /** {@link ConfigOption}s specific for a single execution of a user program. */
 @PublicEvolving
 public class ExecutionOptions {
+    /** A special marker value for disabling buffer timeout. */
+    public static final long DISABLED_NETWORK_BUFFER_TIMEOUT = -1L;
+
+    /** A special marker value for flushing network buffers after each record. */
+    public static final long FLUSH_AFTER_EVERY_RECORD = 0L;
 
     public static final ConfigOption<RuntimeExecutionMode> RUNTIME_MODE =
             ConfigOptions.key("execution.runtime-mode")
@@ -65,6 +70,15 @@ public class ExecutionOptions {
                                                     + "Such an exchange reduces the resources required to execute the "
                                                     + "job as it does not need to run upstream and downstream "
                                                     + "tasks simultaneously.")
+                                    .linebreak()
+                                    .text(
+                                            "With hybrid exchanges (experimental), downstream tasks can run anytime as "
+                                                    + "long as upstream tasks start running. When given sufficient "
+                                                    + "resources, it can reduce the overall job execution time by running "
+                                                    + "tasks simultaneously. Otherwise, it also allows jobs to be executed "
+                                                    + "with very little resources. It adapts to custom preferences between "
+                                                    + "persisting less data and restarting less tasks on failures, by "
+                                                    + "providing different spilling strategies.")
                                     .build());
 
     /**
@@ -92,9 +106,11 @@ public class ExecutionOptions {
                                             text(
                                                     "A positive value triggers flushing periodically by that interval"),
                                             text(
-                                                    "0 triggers flushing after every record thus minimizing latency"),
+                                                    FLUSH_AFTER_EVERY_RECORD
+                                                            + " triggers flushing after every record thus minimizing latency"),
                                             text(
-                                                    "-1 ms triggers flushing only when the output buffer is full thus maximizing "
+                                                    DISABLED_NETWORK_BUFFER_TIMEOUT
+                                                            + " ms triggers flushing only when the output buffer is full thus maximizing "
                                                             + "throughput"))
                                     .build());
 

@@ -21,25 +21,22 @@ package org.apache.flink.runtime.leaderelection;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.core.testutils.OneShotLatch;
-import org.apache.flink.runtime.rest.util.NoOpFatalErrorHandler;
+import org.apache.flink.runtime.highavailability.zookeeper.CuratorFrameworkWithUnhandledErrorListener;
 import org.apache.flink.runtime.util.TestingFatalErrorHandlerResource;
 import org.apache.flink.runtime.util.ZooKeeperUtils;
 import org.apache.flink.runtime.zookeeper.ZooKeeperResource;
 import org.apache.flink.util.TestLogger;
 import org.apache.flink.util.function.BiConsumerWithException;
 
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.CuratorFramework;
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.state.ConnectionState;
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.state.ConnectionStateListener;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.CuratorFramework;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.state.ConnectionState;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.state.ConnectionStateListener;
 
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
-import java.time.Duration;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import static org.junit.Assert.assertFalse;
 
@@ -70,7 +67,7 @@ public class ZooKeeperLeaderElectionConnectionHandlingTest extends TestLogger {
                 configuration,
                 (connectionStateListener, contender) -> {
                     connectionStateListener.awaitSuspendedConnection();
-                    contender.awaitRevokeLeadership(Duration.ofSeconds(1L));
+                    contender.awaitRevokeLeadership();
                 });
     }
 
@@ -97,7 +94,7 @@ public class ZooKeeperLeaderElectionConnectionHandlingTest extends TestLogger {
                 configuration,
                 (connectionStateListener, contender) -> {
                     connectionStateListener.awaitLostConnection();
-                    contender.awaitRevokeLeadership(Duration.ofSeconds(1L));
+                    contender.awaitRevokeLeadership();
                 });
     }
 
@@ -130,8 +127,10 @@ public class ZooKeeperLeaderElectionConnectionHandlingTest extends TestLogger {
                     validationLogic,
             Problem problem)
             throws Exception {
-        CuratorFramework client =
-                ZooKeeperUtils.startCuratorFramework(configuration, NoOpFatalErrorHandler.INSTANCE);
+        CuratorFrameworkWithUnhandledErrorListener curatorFrameworkWrapper =
+                ZooKeeperUtils.startCuratorFramework(
+                        configuration, fatalErrorHandlerResource.getFatalErrorHandler());
+        CuratorFramework client = curatorFrameworkWrapper.asCuratorFramework();
         LeaderElectionDriverFactory leaderElectionDriverFactory =
                 new ZooKeeperLeaderElectionDriverFactory(client, PATH);
         DefaultLeaderElectionService leaderElectionService =
@@ -162,7 +161,12 @@ public class ZooKeeperLeaderElectionConnectionHandlingTest extends TestLogger {
             validationLogic.accept(connectionStateListener, contender);
         } finally {
             leaderElectionService.stop();
-            client.close();
+            curatorFrameworkWrapper.close();
+
+            if (problem == Problem.LOST_CONNECTION) {
+                // in case of lost connections we accept that some unhandled error can occur
+                fatalErrorHandlerResource.getFatalErrorHandler().clearError();
+            }
         }
     }
 
@@ -199,9 +203,8 @@ public class ZooKeeperLeaderElectionConnectionHandlingTest extends TestLogger {
             return revokeLeadershipLatch.isTriggered();
         }
 
-        public void awaitRevokeLeadership(Duration timeout)
-                throws InterruptedException, TimeoutException {
-            revokeLeadershipLatch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        public void awaitRevokeLeadership() throws InterruptedException {
+            revokeLeadershipLatch.await();
         }
     }
 

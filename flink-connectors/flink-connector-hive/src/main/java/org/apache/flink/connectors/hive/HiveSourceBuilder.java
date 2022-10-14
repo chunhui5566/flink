@@ -25,8 +25,10 @@ import org.apache.flink.connector.file.src.ContinuousEnumerationSettings;
 import org.apache.flink.connector.file.src.assigners.FileSplitAssigner;
 import org.apache.flink.connector.file.src.assigners.SimpleSplitAssigner;
 import org.apache.flink.connector.file.src.reader.BulkFormat;
-import org.apache.flink.connectors.hive.read.HiveBulkFormatAdapter;
+import org.apache.flink.connector.file.table.ContinuousPartitionFetcher;
+import org.apache.flink.connector.file.table.LimitableBulkFormat;
 import org.apache.flink.connectors.hive.read.HiveContinuousPartitionFetcher;
+import org.apache.flink.connectors.hive.read.HiveInputFormat;
 import org.apache.flink.connectors.hive.read.HiveSourceSplit;
 import org.apache.flink.connectors.hive.util.HiveConfUtils;
 import org.apache.flink.connectors.hive.util.HivePartitionUtils;
@@ -41,9 +43,6 @@ import org.apache.flink.table.catalog.hive.client.HiveShim;
 import org.apache.flink.table.catalog.hive.client.HiveShimLoader;
 import org.apache.flink.table.catalog.hive.util.HiveTableUtil;
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.filesystem.ContinuousPartitionFetcher;
-import org.apache.flink.table.filesystem.FileSystemConnectorOptions;
-import org.apache.flink.table.filesystem.LimitableBulkFormat;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Preconditions;
@@ -65,11 +64,12 @@ import java.util.List;
 import java.util.Map;
 
 import static org.apache.flink.connector.file.src.FileSource.DEFAULT_SPLIT_ASSIGNER;
+import static org.apache.flink.connectors.hive.HiveOptions.STREAMING_SOURCE_ENABLE;
+import static org.apache.flink.connectors.hive.HiveOptions.STREAMING_SOURCE_MONITOR_INTERVAL;
+import static org.apache.flink.connectors.hive.HiveOptions.STREAMING_SOURCE_PARTITION_INCLUDE;
+import static org.apache.flink.connectors.hive.HiveOptions.STREAMING_SOURCE_PARTITION_ORDER;
+import static org.apache.flink.connectors.hive.HiveOptions.TABLE_EXEC_HIVE_FALLBACK_MAPRED_READER;
 import static org.apache.flink.table.catalog.hive.util.HiveTableUtil.checkAcidTable;
-import static org.apache.flink.table.filesystem.FileSystemConnectorOptions.STREAMING_SOURCE_ENABLE;
-import static org.apache.flink.table.filesystem.FileSystemConnectorOptions.STREAMING_SOURCE_MONITOR_INTERVAL;
-import static org.apache.flink.table.filesystem.FileSystemConnectorOptions.STREAMING_SOURCE_PARTITION_INCLUDE;
-import static org.apache.flink.table.filesystem.FileSystemConnectorOptions.STREAMING_SOURCE_PARTITION_ORDER;
 import static org.apache.flink.util.Preconditions.checkArgument;
 
 /** Builder to build {@link HiveSource} instances. */
@@ -80,6 +80,7 @@ public class HiveSourceBuilder {
 
     private final JobConf jobConf;
     private final ReadableConfig flinkConf;
+    private final boolean fallbackMappedReader;
 
     private final ObjectPath tablePath;
     private final Map<String, String> tableOptions;
@@ -90,6 +91,7 @@ public class HiveSourceBuilder {
     private int[] projectedFields;
     private Long limit;
     private List<HiveTablePartition> partitions;
+    private List<String> dynamicFilterPartitionKeys;
 
     /**
      * Creates a builder to read a hive table.
@@ -112,6 +114,7 @@ public class HiveSourceBuilder {
             @Nonnull Map<String, String> tableOptions) {
         this.jobConf = jobConf;
         this.flinkConf = flinkConf;
+        this.fallbackMappedReader = flinkConf.get(TABLE_EXEC_HIVE_FALLBACK_MAPRED_READER);
         this.tablePath = new ObjectPath(dbName, tableName);
         this.hiveVersion = hiveVersion == null ? HiveShimLoader.getHiveVersion() : hiveVersion;
         HiveConf hiveConf = HiveConfUtils.create(jobConf);
@@ -129,6 +132,7 @@ public class HiveSourceBuilder {
         }
         validateScanConfigurations(this.tableOptions);
         checkAcidTable(this.tableOptions, tablePath);
+        setFlinkConfigurationToJobConf();
     }
 
     /**
@@ -149,6 +153,7 @@ public class HiveSourceBuilder {
             @Nonnull CatalogTable catalogTable) {
         this.jobConf = jobConf;
         this.flinkConf = flinkConf;
+        this.fallbackMappedReader = flinkConf.get(TABLE_EXEC_HIVE_FALLBACK_MAPRED_READER);
         this.tablePath = tablePath;
         this.hiveVersion = hiveVersion == null ? HiveShimLoader.getHiveVersion() : hiveVersion;
         this.fullSchema = catalogTable.getSchema();
@@ -156,6 +161,7 @@ public class HiveSourceBuilder {
         this.tableOptions = catalogTable.getOptions();
         validateScanConfigurations(tableOptions);
         checkAcidTable(tableOptions, tablePath);
+        setFlinkConfigurationToJobConf();
     }
 
     /**
@@ -175,12 +181,12 @@ public class HiveSourceBuilder {
             Preconditions.checkState(
                     partitions == null, "setPartitions shouldn't be called in streaming mode");
             if (partitionKeys.isEmpty()) {
-                FileSystemConnectorOptions.PartitionOrder partitionOrder =
+                HiveOptions.PartitionOrder partitionOrder =
                         configuration.get(STREAMING_SOURCE_PARTITION_ORDER);
-                if (partitionOrder != FileSystemConnectorOptions.PartitionOrder.CREATE_TIME) {
+                if (partitionOrder != HiveOptions.PartitionOrder.CREATE_TIME) {
                     throw new UnsupportedOperationException(
                             "Only '"
-                                    + FileSystemConnectorOptions.PartitionOrder.CREATE_TIME
+                                    + HiveOptions.PartitionOrder.CREATE_TIME
                                     + "' is supported for non partitioned table.");
                 }
                 // for non-partitioned table, we need to add the table to partitions because
@@ -239,6 +245,9 @@ public class HiveSourceBuilder {
                 jobConf,
                 tablePath,
                 partitionKeys,
+                hiveVersion,
+                dynamicFilterPartitionKeys,
+                partitions,
                 fetcher,
                 fetcherContext);
     }
@@ -249,6 +258,12 @@ public class HiveSourceBuilder {
      */
     public HiveSourceBuilder setPartitions(List<HiveTablePartition> partitions) {
         this.partitions = partitions;
+        return this;
+    }
+
+    public HiveSourceBuilder setDynamicFilterPartitionKeys(
+            List<String> dynamicFilterPartitionKeys) {
+        this.dynamicFilterPartitionKeys = dynamicFilterPartitionKeys;
         return this;
     }
 
@@ -280,6 +295,38 @@ public class HiveSourceBuilder {
                         STREAMING_SOURCE_PARTITION_INCLUDE.key(), partitionInclude));
     }
 
+    private void setFlinkConfigurationToJobConf() {
+        int splitPartitionThreadNum =
+                flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM);
+        Preconditions.checkArgument(
+                splitPartitionThreadNum >= 1,
+                HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM.key()
+                        + " cannot be less than 1");
+        jobConf.set(
+                HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM.key(),
+                String.valueOf(splitPartitionThreadNum));
+        jobConf.set(
+                HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM_MAX.key(),
+                flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM_MAX).toString());
+        jobConf.set(
+                HiveOptions.TABLE_EXEC_HIVE_SPLIT_MAX_BYTES.key(),
+                String.valueOf(
+                        flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_SPLIT_MAX_BYTES).getBytes()));
+        jobConf.set(
+                HiveOptions.TABLE_EXEC_HIVE_FILE_OPEN_COST.key(),
+                String.valueOf(
+                        flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_FILE_OPEN_COST).getBytes()));
+        int calPartitionSizeThreadNum =
+                flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM);
+        Preconditions.checkArgument(
+                calPartitionSizeThreadNum >= 1,
+                HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM.key()
+                        + " cannot be less than 1");
+        jobConf.set(
+                HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM.key(),
+                String.valueOf(calPartitionSizeThreadNum));
+    }
+
     private boolean isStreamingSource() {
         return Boolean.parseBoolean(
                 tableOptions.getOrDefault(
@@ -308,16 +355,16 @@ public class HiveSourceBuilder {
         return (RowType) producedSchema.toRowDataType().bridgedTo(RowData.class).getLogicalType();
     }
 
-    private BulkFormat<RowData, HiveSourceSplit> createDefaultBulkFormat() {
+    protected BulkFormat<RowData, HiveSourceSplit> createDefaultBulkFormat() {
         return LimitableBulkFormat.create(
-                new HiveBulkFormatAdapter(
+                new HiveInputFormat(
                         new JobConfWrapper(jobConf),
                         partitionKeys,
                         fullSchema.getFieldNames(),
                         fullSchema.getFieldDataTypes(),
                         hiveVersion,
                         getProducedRowType(),
-                        flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_FALLBACK_MAPRED_READER)),
+                        fallbackMappedReader),
                 limit);
     }
 }

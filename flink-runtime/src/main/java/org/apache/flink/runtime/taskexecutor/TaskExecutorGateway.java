@@ -39,7 +39,7 @@ import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
 import org.apache.flink.runtime.rest.messages.LogInfo;
-import org.apache.flink.runtime.rest.messages.taskmanager.ThreadDumpInfo;
+import org.apache.flink.runtime.rest.messages.ThreadDumpInfo;
 import org.apache.flink.runtime.rpc.RpcGateway;
 import org.apache.flink.runtime.rpc.RpcTimeout;
 import org.apache.flink.runtime.taskmanager.Task;
@@ -101,16 +101,22 @@ public interface TaskExecutorGateway
             @RpcTimeout Time timeout);
 
     /**
-     * Batch release/promote intermediate result partitions.
+     * Batch release intermediate result partitions.
      *
      * @param jobId id of the job that the partitions belong to
-     * @param partitionToRelease partition ids to release
-     * @param partitionsToPromote partitions ids to promote
+     * @param partitionIds partition ids to release
      */
-    void releaseOrPromotePartitions(
-            JobID jobId,
-            Set<ResultPartitionID> partitionToRelease,
-            Set<ResultPartitionID> partitionsToPromote);
+    void releasePartitions(JobID jobId, Set<ResultPartitionID> partitionIds);
+
+    /**
+     * Batch promote intermediate result partitions.
+     *
+     * @param jobId id of the job that the partitions belong to
+     * @param partitionIds partition ids to release
+     * @return Future acknowledge that the partitions are successfully promoted.
+     */
+    CompletableFuture<Acknowledge> promotePartitions(
+            JobID jobId, Set<ResultPartitionID> partitionIds);
 
     /**
      * Releases all cluster partitions belong to any of the given data sets.
@@ -143,12 +149,16 @@ public interface TaskExecutorGateway
      * and the checkpoint timestamp.
      *
      * @param executionAttemptID identifying the task
-     * @param checkpointId unique id for the checkpoint
-     * @param checkpointTimestamp is the timestamp when the checkpoint has been initiated
+     * @param completedCheckpointId unique id for the completed checkpoint
+     * @param completedCheckpointTimestamp is the timestamp when the checkpoint has been initiated
+     * @param lastSubsumedCheckpointId unique id for the checkpoint to be subsumed
      * @return Future acknowledge if the checkpoint has been successfully confirmed
      */
     CompletableFuture<Acknowledge> confirmCheckpoint(
-            ExecutionAttemptID executionAttemptID, long checkpointId, long checkpointTimestamp);
+            ExecutionAttemptID executionAttemptID,
+            long completedCheckpointId,
+            long completedCheckpointTimestamp,
+            long lastSubsumedCheckpointId);
 
     /**
      * Abort a checkpoint for the given task. The checkpoint is identified by the checkpoint ID and

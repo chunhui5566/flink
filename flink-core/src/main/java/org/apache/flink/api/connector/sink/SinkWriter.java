@@ -19,7 +19,7 @@
 
 package org.apache.flink.api.connector.sink;
 
-import org.apache.flink.annotation.Experimental;
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.eventtime.Watermark;
 
 import java.io.IOException;
@@ -35,8 +35,10 @@ import java.util.List;
  * @param <InputT> The type of the sink writer's input
  * @param <CommT> The type of information needed to commit data staged by the sink
  * @param <WriterStateT> The type of the writer's state
+ * @deprecated Please use {@link org.apache.flink.api.connector.sink2.SinkWriter} or a derivative.
  */
-@Experimental
+@Deprecated
+@PublicEvolving
 public interface SinkWriter<InputT, CommT, WriterStateT> extends AutoCloseable {
 
     /**
@@ -63,6 +65,9 @@ public interface SinkWriter<InputT, CommT, WriterStateT> extends AutoCloseable {
      *
      * <p>This will be called before we checkpoint the Writer's state in Streaming execution mode.
      *
+     * <p>In case the sink has no explicit committer, this method is still called to allow the
+     * writer to implement a 1-phase commit protocol.
+     *
      * @param flush Whether flushing the un-staged data or not
      * @return The data is ready to commit.
      * @throws IOException if fail to prepare for a commit.
@@ -86,7 +91,14 @@ public interface SinkWriter<InputT, CommT, WriterStateT> extends AutoCloseable {
         return snapshotState();
     }
 
-    /** Context that {@link #write} can use for getting additional data about an input record. */
+    /**
+     * Context that {@link #write} can use for getting additional data about an input record.
+     *
+     * @deprecated Please migrate to {@link org.apache.flink.api.connector.sink2.SinkWriter} and use
+     *     {@link org.apache.flink.api.connector.sink2.SinkWriter.Context}.
+     */
+    @Deprecated
+    @PublicEvolving
     interface Context {
 
         /** Returns the current event-time watermark. */

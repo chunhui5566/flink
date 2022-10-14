@@ -21,13 +21,15 @@ package org.apache.flink.runtime.util;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.core.testutils.FlinkMatchers;
+import org.apache.flink.runtime.highavailability.zookeeper.CuratorFrameworkWithUnhandledErrorListener;
 import org.apache.flink.runtime.rest.util.NoOpFatalErrorHandler;
+import org.apache.flink.runtime.testutils.ZooKeeperTestUtils;
 import org.apache.flink.util.TestLogger;
 
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.CuratorFramework;
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.recipes.cache.TreeCache;
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.recipes.cache.TreeCacheEvent;
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.recipes.cache.TreeCacheListener;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.CuratorFramework;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cache.TreeCache;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cache.TreeCacheEvent;
+import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cache.TreeCacheListener;
 import org.apache.flink.shaded.guava30.com.google.common.io.Closer;
 
 import org.apache.curator.test.TestingServer;
@@ -52,6 +54,7 @@ public class ZooKeeperUtilsTreeCacheTest extends TestLogger {
 
     private Closer closer;
     private CuratorFramework client;
+    private CuratorFrameworkWithUnhandledErrorListener curatorFrameworkWrapper;
 
     private final AtomicReference<CompletableFuture<Void>> callbackFutureReference =
             new AtomicReference<>();
@@ -59,20 +62,20 @@ public class ZooKeeperUtilsTreeCacheTest extends TestLogger {
     @Before
     public void setUp() throws Exception {
         closer = Closer.create();
-        final TestingServer testingServer = closer.register(new TestingServer());
+        final TestingServer testingServer =
+                closer.register(ZooKeeperTestUtils.createAndStartZookeeperTestingServer());
 
         Configuration configuration = new Configuration();
         configuration.set(
                 HighAvailabilityOptions.HA_ZOOKEEPER_QUORUM, testingServer.getConnectString());
 
-        client =
+        curatorFrameworkWrapper =
                 closer.register(
                         ZooKeeperUtils.startCuratorFramework(
                                 configuration, NoOpFatalErrorHandler.INSTANCE));
-        client =
-                closer.register(
-                        ZooKeeperUtils.startCuratorFramework(
-                                configuration, NoOpFatalErrorHandler.INSTANCE));
+
+        client = curatorFrameworkWrapper.asCuratorFramework();
+
         final TreeCache cache =
                 closer.register(
                         ZooKeeperUtils.createTreeCache(

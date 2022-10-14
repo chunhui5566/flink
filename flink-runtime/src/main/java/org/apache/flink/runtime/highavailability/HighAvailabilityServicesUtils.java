@@ -32,8 +32,9 @@ import org.apache.flink.runtime.dispatcher.Dispatcher;
 import org.apache.flink.runtime.highavailability.nonha.embedded.EmbeddedHaServices;
 import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneClientHAServices;
 import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneHaServices;
+import org.apache.flink.runtime.highavailability.zookeeper.CuratorFrameworkWithUnhandledErrorListener;
 import org.apache.flink.runtime.highavailability.zookeeper.ZooKeeperClientHAServices;
-import org.apache.flink.runtime.highavailability.zookeeper.ZooKeeperHaServices;
+import org.apache.flink.runtime.highavailability.zookeeper.ZooKeeperMultipleComponentLeaderElectionHaServices;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.runtime.resourcemanager.ResourceManager;
 import org.apache.flink.runtime.rpc.AddressResolution;
@@ -44,8 +45,6 @@ import org.apache.flink.runtime.util.ZooKeeperUtils;
 import org.apache.flink.util.ConfigurationException;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.InstantiationUtil;
-
-import org.apache.flink.shaded.curator4.org.apache.curator.framework.CuratorFramework;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -67,13 +66,13 @@ public class HighAvailabilityServicesUtils {
                 return new EmbeddedHaServices(executor);
 
             case ZOOKEEPER:
-                BlobStoreService blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
+                return createZooKeeperHaServices(config, executor, fatalErrorHandler);
 
-                return new ZooKeeperHaServices(
-                        ZooKeeperUtils.startCuratorFramework(config, fatalErrorHandler),
-                        executor,
+            case KUBERNETES:
+                return createCustomHAServices(
+                        "org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory",
                         config,
-                        blobStoreService);
+                        executor);
 
             case FACTORY_CLASS:
                 return createCustomHAServices(config, executor);
@@ -82,6 +81,22 @@ public class HighAvailabilityServicesUtils {
                 throw new Exception(
                         "High availability mode " + highAvailabilityMode + " is not supported.");
         }
+    }
+
+    private static HighAvailabilityServices createZooKeeperHaServices(
+            Configuration configuration, Executor executor, FatalErrorHandler fatalErrorHandler)
+            throws Exception {
+        BlobStoreService blobStoreService = BlobUtils.createBlobStoreFromConfig(configuration);
+
+        final CuratorFrameworkWithUnhandledErrorListener curatorFrameworkWrapper =
+                ZooKeeperUtils.startCuratorFramework(configuration, fatalErrorHandler);
+
+        return new ZooKeeperMultipleComponentLeaderElectionHaServices(
+                curatorFrameworkWrapper,
+                configuration,
+                executor,
+                blobStoreService,
+                fatalErrorHandler);
     }
 
     public static HighAvailabilityServices createHighAvailabilityServices(
@@ -119,14 +134,12 @@ public class HighAvailabilityServicesUtils {
                 return new StandaloneHaServices(
                         resourceManagerRpcUrl, dispatcherRpcUrl, webMonitorAddress);
             case ZOOKEEPER:
-                BlobStoreService blobStoreService =
-                        BlobUtils.createBlobStoreFromConfig(configuration);
-
-                return new ZooKeeperHaServices(
-                        ZooKeeperUtils.startCuratorFramework(configuration, fatalErrorHandler),
-                        executor,
+                return createZooKeeperHaServices(configuration, executor, fatalErrorHandler);
+            case KUBERNETES:
+                return createCustomHAServices(
+                        "org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory",
                         configuration,
-                        blobStoreService);
+                        executor);
 
             case FACTORY_CLASS:
                 return createCustomHAServices(configuration, executor);
@@ -147,9 +160,13 @@ public class HighAvailabilityServicesUtils {
                                 configuration, AddressResolution.TRY_ADDRESS_RESOLUTION);
                 return new StandaloneClientHAServices(webMonitorAddress);
             case ZOOKEEPER:
-                final CuratorFramework client =
-                        ZooKeeperUtils.startCuratorFramework(configuration, fatalErrorHandler);
-                return new ZooKeeperClientHAServices(client, configuration);
+                return new ZooKeeperClientHAServices(
+                        ZooKeeperUtils.startCuratorFramework(configuration, fatalErrorHandler),
+                        configuration);
+            case KUBERNETES:
+                return createCustomClientHAServices(
+                        "org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory",
+                        configuration);
             case FACTORY_CLASS:
                 return createCustomClientHAServices(configuration);
             default:
@@ -265,9 +282,15 @@ public class HighAvailabilityServicesUtils {
 
     private static HighAvailabilityServices createCustomHAServices(
             Configuration config, Executor executor) throws FlinkException {
+        return createCustomHAServices(
+                config.getString(HighAvailabilityOptions.HA_MODE), config, executor);
+    }
+
+    private static HighAvailabilityServices createCustomHAServices(
+            String factoryClassName, Configuration config, Executor executor)
+            throws FlinkException {
         final HighAvailabilityServicesFactory highAvailabilityServicesFactory =
-                loadCustomHighAvailabilityServicesFactory(
-                        config.getString(HighAvailabilityOptions.HA_MODE));
+                loadCustomHighAvailabilityServicesFactory(factoryClassName);
 
         try {
             return highAvailabilityServicesFactory.createHAServices(config, executor);
@@ -292,9 +315,14 @@ public class HighAvailabilityServicesUtils {
 
     private static ClientHighAvailabilityServices createCustomClientHAServices(Configuration config)
             throws FlinkException {
+        return createCustomClientHAServices(
+                config.getString(HighAvailabilityOptions.HA_MODE), config);
+    }
+
+    private static ClientHighAvailabilityServices createCustomClientHAServices(
+            String factoryClassName, Configuration config) throws FlinkException {
         final HighAvailabilityServicesFactory highAvailabilityServicesFactory =
-                loadCustomHighAvailabilityServicesFactory(
-                        config.getString(HighAvailabilityOptions.HA_MODE));
+                loadCustomHighAvailabilityServicesFactory(factoryClassName);
 
         try {
             return highAvailabilityServicesFactory.createClientHAServices(config);

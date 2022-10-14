@@ -26,15 +26,17 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.sink.KafkaSinkBuilder;
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
-import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer;
 import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.table.connector.Projection;
+import org.apache.flink.table.connector.ProviderContext;
 import org.apache.flink.table.connector.format.EncodingFormat;
 import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
-import org.apache.flink.table.connector.sink.SinkProvider;
+import org.apache.flink.table.connector.sink.SinkV2Provider;
 import org.apache.flink.table.connector.sink.abilities.SupportsWritingMetadata;
 import org.apache.flink.table.data.ArrayData;
 import org.apache.flink.table.data.MapData;
@@ -57,7 +59,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
-import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -65,6 +66,8 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 /** A version-agnostic Kafka {@link DynamicTableSink}. */
 @Internal
 public class KafkaDynamicSink implements DynamicTableSink, SupportsWritingMetadata {
+
+    private static final String UPSERT_KAFKA_TRANSFORMATION = "upsert-kafka";
 
     // --------------------------------------------------------------------------------------------
     // Mutable attributes
@@ -197,7 +200,7 @@ public class KafkaDynamicSink implements DynamicTableSink, SupportsWritingMetada
         }
         final KafkaSink<RowData> kafkaSink =
                 sinkBuilder
-                        .setDeliverGuarantee(deliveryGuarantee)
+                        .setDeliveryGuarantee(deliveryGuarantee)
                         .setBootstrapServers(
                                 properties.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG).toString())
                         .setKafkaProducerConfig(properties)
@@ -214,33 +217,34 @@ public class KafkaDynamicSink implements DynamicTableSink, SupportsWritingMetada
                                         upsertMode))
                         .build();
         if (flushMode.isEnabled() && upsertMode) {
-            return (DataStreamSinkProvider)
-                    dataStream -> {
-                        final boolean objectReuse =
-                                dataStream
-                                        .getExecutionEnvironment()
-                                        .getConfig()
-                                        .isObjectReuseEnabled();
-                        final ReducingUpsertSink<?> sink =
-                                new ReducingUpsertSink<>(
-                                        kafkaSink,
-                                        physicalDataType,
-                                        keyProjection,
-                                        flushMode,
-                                        objectReuse
-                                                ? createRowDataTypeSerializer(
-                                                                context,
-                                                                dataStream.getExecutionConfig())
-                                                        ::copy
-                                                : Function.identity());
-                        final DataStreamSink<RowData> end = dataStream.sinkTo(sink);
-                        if (parallelism != null) {
-                            end.setParallelism(parallelism);
-                        }
-                        return end;
-                    };
+            return new DataStreamSinkProvider() {
+                @Override
+                public DataStreamSink<?> consumeDataStream(
+                        ProviderContext providerContext, DataStream<RowData> dataStream) {
+                    final boolean objectReuse =
+                            dataStream.getExecutionEnvironment().getConfig().isObjectReuseEnabled();
+                    final ReducingUpsertSink<?> sink =
+                            new ReducingUpsertSink<>(
+                                    kafkaSink,
+                                    physicalDataType,
+                                    keyProjection,
+                                    flushMode,
+                                    objectReuse
+                                            ? createRowDataTypeSerializer(
+                                                            context,
+                                                            dataStream.getExecutionConfig())
+                                                    ::copy
+                                            : rowData -> rowData);
+                    final DataStreamSink<RowData> end = dataStream.sinkTo(sink);
+                    providerContext.generateUid(UPSERT_KAFKA_TRANSFORMATION).ifPresent(end::uid);
+                    if (parallelism != null) {
+                        end.setParallelism(parallelism);
+                    }
+                    return end;
+                }
+            };
         }
-        return SinkProvider.of(kafkaSink, parallelism);
+        return SinkV2Provider.of(kafkaSink, parallelism);
     }
 
     @Override
@@ -359,20 +363,6 @@ public class KafkaDynamicSink implements DynamicTableSink, SupportsWritingMetada
         return metadataKeys.size() > 0;
     }
 
-    private static FlinkKafkaProducer.Semantic getSemantic(DeliveryGuarantee deliveryGuarantee) {
-        switch (deliveryGuarantee) {
-            case NONE:
-                return FlinkKafkaProducer.Semantic.NONE;
-            case AT_LEAST_ONCE:
-                return FlinkKafkaProducer.Semantic.AT_LEAST_ONCE;
-            case EXACTLY_ONCE:
-                return FlinkKafkaProducer.Semantic.EXACTLY_ONCE;
-            default:
-                throw new IllegalStateException(
-                        "Unsupported delivery guarantee " + deliveryGuarantee);
-        }
-    }
-
     private RowData.FieldGetter[] getFieldGetters(
             List<LogicalType> physicalChildren, int[] keyProjection) {
         return Arrays.stream(keyProjection)
@@ -391,8 +381,7 @@ public class KafkaDynamicSink implements DynamicTableSink, SupportsWritingMetada
         if (format == null) {
             return null;
         }
-        DataType physicalFormatDataType =
-                DataTypeUtils.projectRow(this.physicalDataType, projection);
+        DataType physicalFormatDataType = Projection.of(projection).project(this.physicalDataType);
         if (prefix != null) {
             physicalFormatDataType = DataTypeUtils.stripRowPrefix(physicalFormatDataType, prefix);
         }

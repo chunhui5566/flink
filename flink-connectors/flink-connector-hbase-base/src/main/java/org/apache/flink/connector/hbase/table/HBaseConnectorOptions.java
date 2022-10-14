@@ -22,6 +22,7 @@ import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.table.connector.source.lookup.LookupOptions;
 import org.apache.flink.table.factories.FactoryUtil;
 
 import java.time.Duration;
@@ -34,7 +35,10 @@ public class HBaseConnectorOptions {
             ConfigOptions.key("table-name")
                     .stringType()
                     .noDefaultValue()
-                    .withDescription("The name of HBase table to connect.");
+                    .withDescription(
+                            "The name of HBase table to connect. "
+                                    + "By default, the table is in 'default' namespace. "
+                                    + "To assign the table a specified namespace you need to use 'namespace:table'.");
 
     public static final ConfigOption<String> ZOOKEEPER_QUORUM =
             ConfigOptions.key("zookeeper.quorum")
@@ -90,6 +94,8 @@ public class HBaseConnectorOptions {
                     .defaultValue(false)
                     .withDescription("whether to set async lookup.");
 
+    /** @deprecated Please use {@link LookupOptions#PARTIAL_CACHE_MAX_ROWS} instead. */
+    @Deprecated
     public static final ConfigOption<Long> LOOKUP_CACHE_MAX_ROWS =
             ConfigOptions.key("lookup.cache.max-rows")
                     .longType()
@@ -99,12 +105,15 @@ public class HBaseConnectorOptions {
                                     + "be eliminated. \"cache.max-rows\" and \"cache.ttl\" options must all be specified if any of them is "
                                     + "specified. Cache is not enabled as default.");
 
+    /** @deprecated Please use {@link LookupOptions#PARTIAL_CACHE_EXPIRE_AFTER_WRITE} instead. */
+    @Deprecated
     public static final ConfigOption<Duration> LOOKUP_CACHE_TTL =
             ConfigOptions.key("lookup.cache.ttl")
                     .durationType()
                     .defaultValue(Duration.ofSeconds(0))
                     .withDescription("the cache time to live.");
 
+    /** @deprecated Please used {@link LookupOptions#MAX_RETRIES} instead. */
     public static final ConfigOption<Integer> LOOKUP_MAX_RETRIES =
             ConfigOptions.key("lookup.max-retries")
                     .intType()

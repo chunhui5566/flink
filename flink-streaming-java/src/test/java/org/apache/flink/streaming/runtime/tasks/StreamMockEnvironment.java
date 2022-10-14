@@ -56,12 +56,10 @@ import org.apache.flink.runtime.taskmanager.CheckpointResponder;
 import org.apache.flink.runtime.taskmanager.NoOpCheckpointResponder;
 import org.apache.flink.runtime.taskmanager.NoOpTaskOperatorEventGateway;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
-import org.apache.flink.runtime.throughput.ThroughputCalculator;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.runtime.util.TestingUserCodeClassLoader;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.UserCodeClassLoader;
-import org.apache.flink.util.clock.SystemClock;
 
 import javax.annotation.Nullable;
 
@@ -73,6 +71,7 @@ import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.function.Consumer;
 
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
@@ -129,8 +128,6 @@ public class StreamMockEnvironment implements Environment {
 
     private CheckpointResponder checkpointResponder = NoOpCheckpointResponder.INSTANCE;
 
-    private ThroughputCalculator throughputCalculator;
-
     public StreamMockEnvironment(
             Configuration jobConfig,
             Configuration taskConfig,
@@ -141,7 +138,7 @@ public class StreamMockEnvironment implements Environment {
             TaskStateManager taskStateManager) {
         this(
                 new JobID(),
-                new ExecutionAttemptID(),
+                createExecutionAttemptId(),
                 jobConfig,
                 taskConfig,
                 executionConfig,
@@ -149,7 +146,6 @@ public class StreamMockEnvironment implements Environment {
                 inputSplitProvider,
                 bufferSize,
                 taskStateManager,
-                new ThroughputCalculator(SystemClock.getInstance(), 10),
                 false);
     }
 
@@ -163,20 +159,19 @@ public class StreamMockEnvironment implements Environment {
             MockInputSplitProvider inputSplitProvider,
             int bufferSize,
             TaskStateManager taskStateManager,
-            ThroughputCalculator throughputCalculator,
             boolean collectNetworkEvents) {
 
         this.jobID = jobID;
         this.executionAttemptID = executionAttemptID;
 
-        int subtaskIndex = 0;
+        int subtaskIndex = executionAttemptID.getExecutionVertexId().getSubtaskIndex();
         this.taskInfo =
                 new TaskInfo(
                         "", /* task name */
                         1, /* num key groups / max parallelism */
                         subtaskIndex, /* index of this subtask */
                         1, /* num subtasks */
-                        0 /* attempt number */);
+                        executionAttemptID.getAttemptNumber() /* attempt number */);
         this.jobConfiguration = jobConfig;
         this.taskConfiguration = taskConfig;
         this.inputs = new LinkedList<>();
@@ -193,8 +188,9 @@ public class StreamMockEnvironment implements Environment {
         this.accumulatorRegistry = new AccumulatorRegistry(jobID, getExecutionId());
 
         KvStateRegistry registry = new KvStateRegistry();
-        this.kvStateRegistry = registry.createTaskRegistry(jobID, getJobVertexId());
-        this.throughputCalculator = throughputCalculator;
+        this.kvStateRegistry =
+                registry.createTaskRegistry(
+                        jobID, executionAttemptID.getExecutionVertexId().getJobVertexId());
         this.collectNetworkEvents = collectNetworkEvents;
     }
 
@@ -313,11 +309,6 @@ public class StreamMockEnvironment implements Environment {
     @Override
     public TaskEventDispatcher getTaskEventDispatcher() {
         return taskEventDispatcher;
-    }
-
-    @Override
-    public ThroughputCalculator getThroughputCalculator() {
-        return throughputCalculator;
     }
 
     @Override

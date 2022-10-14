@@ -39,7 +39,7 @@ import org.apache.flink.runtime.messages.TaskThreadInfoResponse;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
 import org.apache.flink.runtime.rest.messages.LogInfo;
-import org.apache.flink.runtime.rest.messages.taskmanager.ThreadDumpInfo;
+import org.apache.flink.runtime.rest.messages.ThreadDumpInfo;
 import org.apache.flink.runtime.webmonitor.threadinfo.ThreadInfoSamplesRequest;
 import org.apache.flink.types.SerializableOptional;
 import org.apache.flink.util.SerializedValue;
@@ -106,11 +106,14 @@ public class TaskExecutorGatewayDecoratorBase implements TaskExecutorGateway {
     }
 
     @Override
-    public void releaseOrPromotePartitions(
-            JobID jobId,
-            Set<ResultPartitionID> partitionToRelease,
-            Set<ResultPartitionID> partitionsToPromote) {
-        originalGateway.releaseOrPromotePartitions(jobId, partitionToRelease, partitionsToPromote);
+    public void releasePartitions(JobID jobId, Set<ResultPartitionID> partitionIds) {
+        originalGateway.releasePartitions(jobId, partitionIds);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> promotePartitions(
+            JobID jobId, Set<ResultPartitionID> partitionIds) {
+        return originalGateway.promotePartitions(jobId, partitionIds);
     }
 
     @Override
@@ -131,9 +134,15 @@ public class TaskExecutorGatewayDecoratorBase implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<Acknowledge> confirmCheckpoint(
-            ExecutionAttemptID executionAttemptID, long checkpointId, long checkpointTimestamp) {
+            ExecutionAttemptID executionAttemptID,
+            long completedCheckpointId,
+            long completedCheckpointTimestamp,
+            long lastSubsumedCheckpointId) {
         return originalGateway.confirmCheckpoint(
-                executionAttemptID, checkpointId, checkpointTimestamp);
+                executionAttemptID,
+                completedCheckpointId,
+                completedCheckpointTimestamp,
+                lastSubsumedCheckpointId);
     }
 
     @Override
@@ -225,10 +234,10 @@ public class TaskExecutorGatewayDecoratorBase implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<TaskThreadInfoResponse> requestThreadInfoSamples(
-            ExecutionAttemptID taskExecutionAttemptId,
+            Collection<ExecutionAttemptID> taskExecutionAttemptIds,
             ThreadInfoSamplesRequest requestParams,
             Time timeout) {
         return originalGateway.requestThreadInfoSamples(
-                taskExecutionAttemptId, requestParams, timeout);
+                taskExecutionAttemptIds, requestParams, timeout);
     }
 }

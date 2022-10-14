@@ -19,47 +19,45 @@
 package org.apache.flink.connector.pulsar.testutils;
 
 import org.apache.flink.connector.pulsar.testutils.runtime.PulsarRuntimeOperator;
-import org.apache.flink.connectors.test.common.external.ExternalContext;
+import org.apache.flink.connector.testframe.external.ExternalContext;
 
-import java.util.ArrayList;
+import org.apache.pulsar.client.api.Schema;
+
+import java.net.URL;
+import java.util.Collections;
 import java.util.List;
-import java.util.Random;
 
-import static org.apache.commons.lang3.RandomStringUtils.randomAlphanumeric;
+/**
+ * The implementation for Flink connector test tools. Providing the common test case writing
+ * constraint for both source, sink and table API.
+ */
+public abstract class PulsarTestContext<T> implements ExternalContext {
 
-/** Common test context for pulsar based test. */
-public abstract class PulsarTestContext<T> implements ExternalContext<T> {
-
-    private static final int NUM_RECORDS_UPPER_BOUND = 500;
-    private static final int NUM_RECORDS_LOWER_BOUND = 100;
-
-    private final String displayName;
     protected final PulsarRuntimeOperator operator;
+    // The schema used for consuming and producing messages between Pulsar and tests.
+    protected final Schema<T> schema;
 
-    protected PulsarTestContext(String displayName, PulsarTestEnvironment environment) {
-        this.displayName = displayName;
+    protected PulsarTestContext(PulsarTestEnvironment environment, Schema<T> schema) {
         this.operator = environment.operator();
+        this.schema = schema;
     }
 
-    // Helper methods for generating data.
-
-    protected List<String> generateStringTestData(int splitIndex, long seed) {
-        Random random = new Random(seed);
-        int recordNum =
-                random.nextInt(NUM_RECORDS_UPPER_BOUND - NUM_RECORDS_LOWER_BOUND)
-                        + NUM_RECORDS_LOWER_BOUND;
-        List<String> records = new ArrayList<>(recordNum);
-
-        for (int i = 0; i < recordNum; i++) {
-            int stringLength = random.nextInt(50) + 1;
-            records.add(splitIndex + "-" + randomAlphanumeric(stringLength));
-        }
-
-        return records;
-    }
+    /** Implement this method for providing a more friendly test name in IDE. */
+    protected abstract String displayName();
 
     @Override
     public String toString() {
-        return displayName;
+        return displayName();
+    }
+
+    @Override
+    public List<URL> getConnectorJarPaths() {
+        // We don't need any test jars definition. They are provided in docker-related environments.
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void close() throws Exception {
+        // All the topics would be deleted in the PulsarRuntime. No need to manually close them.
     }
 }

@@ -19,38 +19,47 @@
 
 package org.apache.flink.table.client.gateway.local;
 
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.client.cli.DefaultCLI;
 import org.apache.flink.client.program.ClusterClient;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.configuration.WebOptions;
+import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.table.api.TableResult;
+import org.apache.flink.table.api.config.TableConfigOptions;
 import org.apache.flink.table.client.config.ResultMode;
 import org.apache.flink.table.client.gateway.Executor;
 import org.apache.flink.table.client.gateway.ResultDescriptor;
 import org.apache.flink.table.client.gateway.TypedResult;
 import org.apache.flink.table.client.gateway.context.DefaultContext;
-import org.apache.flink.table.client.gateway.utils.TestUserClassLoaderJar;
-import org.apache.flink.table.client.gateway.utils.UserDefinedFunctions.TableUDF;
+import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.AggregateFunction;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.operations.QueryOperation;
-import org.apache.flink.test.util.MiniClusterWithClientResource;
+import org.apache.flink.table.utils.UserDefinedFunctions;
+import org.apache.flink.table.utils.print.RowDataToStringConverter;
+import org.apache.flink.test.junit5.InjectClusterClient;
+import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.test.util.TestBaseUtils;
-import org.apache.flink.types.Row;
+import org.apache.flink.util.StringUtils;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.UserClassLoaderJarTestUtils;
 
-import org.junit.BeforeClass;
-import org.junit.ClassRule;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.io.IOException;
@@ -63,6 +72,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -70,11 +80,10 @@ import java.util.stream.Stream;
 import static org.apache.flink.configuration.ExecutionOptions.RUNTIME_MODE;
 import static org.apache.flink.table.client.config.SqlClientOptions.EXECUTION_MAX_TABLE_RESULT_ROWS;
 import static org.apache.flink.table.client.config.SqlClientOptions.EXECUTION_RESULT_MODE;
-import static org.apache.flink.table.client.gateway.utils.UserDefinedFunctions.ScalarUDF;
+import static org.apache.flink.table.utils.UserDefinedFunctions.GENERATED_LOWER_UDF_CLASS;
+import static org.apache.flink.table.utils.UserDefinedFunctions.GENERATED_LOWER_UDF_CODE;
 import static org.apache.flink.util.Preconditions.checkState;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Contains basic tests for the {@link LocalExecutor}. */
 public class LocalExecutorITCase extends TestLogger {
@@ -82,28 +91,36 @@ public class LocalExecutorITCase extends TestLogger {
     private static final int NUM_TMS = 2;
     private static final int NUM_SLOTS_PER_TM = 2;
 
-    @ClassRule public static TemporaryFolder tempFolder = new TemporaryFolder();
+    @TempDir
+    @Order(1)
+    public static File tempFolder;
 
-    @ClassRule
-    public static final MiniClusterWithClientResource MINI_CLUSTER_RESOURCE =
-            new MiniClusterWithClientResource(
-                    new MiniClusterResourceConfiguration.Builder()
-                            .setConfiguration(getConfig())
-                            .setNumberTaskManagers(NUM_TMS)
-                            .setNumberSlotsPerTaskManager(NUM_SLOTS_PER_TM)
-                            .build());
+    @RegisterExtension
+    @Order(2)
+    public static final MiniClusterExtension MINI_CLUSTER_RESOURCE =
+            new MiniClusterExtension(
+                    () ->
+                            new MiniClusterResourceConfiguration.Builder()
+                                    .setConfiguration(getConfig())
+                                    .setNumberTaskManagers(NUM_TMS)
+                                    .setNumberSlotsPerTaskManager(NUM_SLOTS_PER_TM)
+                                    .build());
 
     private static ClusterClient<?> clusterClient;
 
     // a generated UDF jar used for testing classloading of dependencies
     private static URL udfDependency;
 
-    @BeforeClass
-    public static void setup() throws IOException {
-        clusterClient = MINI_CLUSTER_RESOURCE.getClusterClient();
+    @BeforeAll
+    public static void setup(@InjectClusterClient ClusterClient<?> injectedClusterClient)
+            throws Exception {
+        clusterClient = injectedClusterClient;
         File udfJar =
-                TestUserClassLoaderJar.createJarFile(
-                        tempFolder.newFolder("test-jar"), "test-classloader-udf.jar");
+                UserClassLoaderJarTestUtils.createJarFile(
+                        tempFolder,
+                        "test-classloader-udf.jar",
+                        GENERATED_LOWER_UDF_CLASS,
+                        String.format(GENERATED_LOWER_UDF_CODE, GENERATED_LOWER_UDF_CLASS));
         udfDependency = udfJar.toURI().toURL();
     }
 
@@ -113,38 +130,41 @@ public class LocalExecutorITCase extends TestLogger {
         config.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, NUM_TMS);
         config.setInteger(TaskManagerOptions.NUM_TASK_SLOTS, NUM_SLOTS_PER_TM);
         config.setBoolean(WebOptions.SUBMIT_ENABLE, false);
+        config.set(StateBackendOptions.STATE_BACKEND, "hashmap");
+        config.set(CheckpointingOptions.CHECKPOINT_STORAGE, "filesystem");
+        config.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, tempFolder.toURI().toString());
+        config.set(CheckpointingOptions.SAVEPOINT_DIRECTORY, tempFolder.toURI().toString());
         return config;
     }
-
-    @Rule public ExpectedException exception = ExpectedException.none();
 
     @Test
     public void testCompleteStatement() {
         final Executor executor = createLocalExecutor();
         String sessionId = executor.openSession("test-session");
-        assertEquals("test-session", sessionId);
+        assertThat(sessionId).isEqualTo("test-session");
         initSession(executor, sessionId, Collections.emptyMap());
 
         final List<String> expectedTableHints =
                 Arrays.asList(
                         "default_catalog.default_database.TableNumber1",
                         "default_catalog.default_database.TableSourceSink");
-        assertEquals(
-                expectedTableHints, executor.completeStatement(sessionId, "SELECT * FROM Ta", 16));
+        assertThat(executor.completeStatement(sessionId, "SELECT * FROM Ta", 16))
+                .isEqualTo(expectedTableHints);
 
         final List<String> expectedClause = Collections.singletonList("WHERE");
-        assertEquals(
-                expectedClause,
-                executor.completeStatement(sessionId, "SELECT * FROM TableNumber1 WH", 29));
+        assertThat(executor.completeStatement(sessionId, "SELECT * FROM TableNumber1 WH", 29))
+                .isEqualTo(expectedClause);
 
-        final List<String> expectedField = Arrays.asList("IntegerField1");
-        assertEquals(
-                expectedField,
-                executor.completeStatement(sessionId, "SELECT * FROM TableNumber1 WHERE Inte", 37));
+        final List<String> expectedField = Collections.singletonList("IntegerField1");
+        assertThat(
+                        executor.completeStatement(
+                                sessionId, "SELECT * FROM TableNumber1 WHERE Inte", 37))
+                .isEqualTo(expectedField);
         executor.closeSession(sessionId);
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testStreamQueryExecutionChangelog() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -156,7 +176,7 @@ public class LocalExecutorITCase extends TestLogger {
         final LocalExecutor executor =
                 createLocalExecutor(Collections.singletonList(udfDependency), configuration);
         String sessionId = executor.openSession("test-session");
-        assertEquals("test-session", sessionId);
+        assertThat(sessionId).isEqualTo("test-session");
 
         initSession(executor, sessionId, replaceVars);
         try {
@@ -167,18 +187,22 @@ public class LocalExecutorITCase extends TestLogger {
                             sessionId,
                             "SELECT scalarUDF(IntegerField1, 5), StringField1, 'ABC' FROM TableNumber1");
 
-            assertFalse(desc.isMaterialized());
+            assertThat(desc.isMaterialized()).isFalse();
 
             final List<String> actualResults =
-                    retrieveChangelogResult(executor, sessionId, desc.getResultId());
+                    retrieveChangelogResult(
+                            executor,
+                            sessionId,
+                            desc.getResultId(),
+                            desc.getRowDataStringConverter());
 
             final List<String> expectedResults = new ArrayList<>();
-            expectedResults.add("+I[47, Hello World, ABC]");
-            expectedResults.add("+I[27, Hello World, ABC]");
-            expectedResults.add("+I[37, Hello World, ABC]");
-            expectedResults.add("+I[37, Hello World, ABC]");
-            expectedResults.add("+I[47, Hello World, ABC]");
-            expectedResults.add("+I[57, Hello World!!!!, ABC]");
+            expectedResults.add("[47, Hello World, ABC]");
+            expectedResults.add("[27, Hello World, ABC]");
+            expectedResults.add("[37, Hello World, ABC]");
+            expectedResults.add("[37, Hello World, ABC]");
+            expectedResults.add("[47, Hello World, ABC]");
+            expectedResults.add("[57, Hello World!!!!, ABC]");
 
             TestBaseUtils.compareResultCollections(
                     expectedResults, actualResults, Comparator.naturalOrder());
@@ -187,7 +211,8 @@ public class LocalExecutorITCase extends TestLogger {
         }
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testStreamQueryExecutionChangelogMultipleTimes() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -199,15 +224,15 @@ public class LocalExecutorITCase extends TestLogger {
         final LocalExecutor executor =
                 createLocalExecutor(Collections.singletonList(udfDependency), configuration);
         String sessionId = executor.openSession("test-session");
-        assertEquals("test-session", sessionId);
+        assertThat(sessionId).isEqualTo("test-session");
 
         final List<String> expectedResults = new ArrayList<>();
-        expectedResults.add("+I[47, Hello World]");
-        expectedResults.add("+I[27, Hello World]");
-        expectedResults.add("+I[37, Hello World]");
-        expectedResults.add("+I[37, Hello World]");
-        expectedResults.add("+I[47, Hello World]");
-        expectedResults.add("+I[57, Hello World!!!!]");
+        expectedResults.add("[47, Hello World]");
+        expectedResults.add("[27, Hello World]");
+        expectedResults.add("[37, Hello World]");
+        expectedResults.add("[37, Hello World]");
+        expectedResults.add("[47, Hello World]");
+        expectedResults.add("[57, Hello World!!!!]");
 
         initSession(executor, sessionId, replaceVars);
         try {
@@ -219,10 +244,14 @@ public class LocalExecutorITCase extends TestLogger {
                                 sessionId,
                                 "SELECT scalarUDF(IntegerField1, 5), StringField1 FROM TableNumber1");
 
-                assertFalse(desc.isMaterialized());
+                assertThat(desc.isMaterialized()).isFalse();
 
                 final List<String> actualResults =
-                        retrieveChangelogResult(executor, sessionId, desc.getResultId());
+                        retrieveChangelogResult(
+                                executor,
+                                sessionId,
+                                desc.getResultId(),
+                                desc.getRowDataStringConverter());
 
                 TestBaseUtils.compareResultCollections(
                         expectedResults, actualResults, Comparator.naturalOrder());
@@ -232,7 +261,8 @@ public class LocalExecutorITCase extends TestLogger {
         }
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testStreamQueryExecutionTable() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -247,17 +277,18 @@ public class LocalExecutorITCase extends TestLogger {
                 "SELECT scalarUDF(IntegerField1, 5), StringField1, 'ABC' FROM TableNumber1";
 
         final List<String> expectedResults = new ArrayList<>();
-        expectedResults.add("+I[47, Hello World, ABC]");
-        expectedResults.add("+I[27, Hello World, ABC]");
-        expectedResults.add("+I[37, Hello World, ABC]");
-        expectedResults.add("+I[37, Hello World, ABC]");
-        expectedResults.add("+I[47, Hello World, ABC]");
-        expectedResults.add("+I[57, Hello World!!!!, ABC]");
+        expectedResults.add("[47, Hello World, ABC]");
+        expectedResults.add("[27, Hello World, ABC]");
+        expectedResults.add("[37, Hello World, ABC]");
+        expectedResults.add("[37, Hello World, ABC]");
+        expectedResults.add("[47, Hello World, ABC]");
+        expectedResults.add("[57, Hello World!!!!, ABC]");
 
         executeStreamQueryTable(replaceVars, configMap, query, expectedResults);
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testStreamQueryExecutionTableMultipleTimes() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -271,19 +302,20 @@ public class LocalExecutorITCase extends TestLogger {
         final String query = "SELECT scalarUDF(IntegerField1, 5), StringField1 FROM TableNumber1";
 
         final List<String> expectedResults = new ArrayList<>();
-        expectedResults.add("+I[47, Hello World]");
-        expectedResults.add("+I[27, Hello World]");
-        expectedResults.add("+I[37, Hello World]");
-        expectedResults.add("+I[37, Hello World]");
-        expectedResults.add("+I[47, Hello World]");
-        expectedResults.add("+I[57, Hello World!!!!]");
+        expectedResults.add("[47, Hello World]");
+        expectedResults.add("[27, Hello World]");
+        expectedResults.add("[37, Hello World]");
+        expectedResults.add("[37, Hello World]");
+        expectedResults.add("[47, Hello World]");
+        expectedResults.add("[57, Hello World!!!!]");
 
         for (int i = 0; i < 3; i++) {
             executeStreamQueryTable(replaceVars, configMap, query, expectedResults);
         }
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testStreamQueryExecutionLimitedTable() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -299,12 +331,13 @@ public class LocalExecutorITCase extends TestLogger {
                 "SELECT COUNT(*), StringField1 FROM TableNumber1 GROUP BY StringField1";
 
         final List<String> expectedResults = new ArrayList<>();
-        expectedResults.add("+I[1, Hello World!!!!]");
+        expectedResults.add("[1, Hello World!!!!]");
 
         executeStreamQueryTable(replaceVars, configMap, query, expectedResults);
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testBatchQueryExecution() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -319,25 +352,29 @@ public class LocalExecutorITCase extends TestLogger {
                 createLocalExecutor(
                         Collections.singletonList(udfDependency), Configuration.fromMap(configMap));
         String sessionId = executor.openSession("test-session");
-        assertEquals("test-session", sessionId);
+        assertThat(sessionId).isEqualTo("test-session");
 
         initSession(executor, sessionId, replaceVars);
         try {
             final ResultDescriptor desc =
                     executeQuery(executor, sessionId, "SELECT *, 'ABC' FROM TestView1");
 
-            assertTrue(desc.isMaterialized());
+            assertThat(desc.isMaterialized()).isTrue();
 
             final List<String> actualResults =
-                    retrieveTableResult(executor, sessionId, desc.getResultId());
+                    retrieveTableResult(
+                            executor,
+                            sessionId,
+                            desc.getResultId(),
+                            desc.getRowDataStringConverter());
 
             final List<String> expectedResults = new ArrayList<>();
-            expectedResults.add("+I[47, ABC]");
-            expectedResults.add("+I[27, ABC]");
-            expectedResults.add("+I[37, ABC]");
-            expectedResults.add("+I[37, ABC]");
-            expectedResults.add("+I[47, ABC]");
-            expectedResults.add("+I[57, ABC]");
+            expectedResults.add("[47, ABC]");
+            expectedResults.add("[27, ABC]");
+            expectedResults.add("[37, ABC]");
+            expectedResults.add("[37, ABC]");
+            expectedResults.add("[47, ABC]");
+            expectedResults.add("[57, ABC]");
 
             TestBaseUtils.compareResultCollections(
                     expectedResults, actualResults, Comparator.naturalOrder());
@@ -346,7 +383,8 @@ public class LocalExecutorITCase extends TestLogger {
         }
     }
 
-    @Test(timeout = 90_000L)
+    @Test
+    @Timeout(value = 90)
     public void testBatchQueryExecutionMultipleTimes() throws Exception {
         final URL url = getClass().getClassLoader().getResource("test-data.csv");
         Objects.requireNonNull(url);
@@ -361,30 +399,74 @@ public class LocalExecutorITCase extends TestLogger {
                 createLocalExecutor(
                         Collections.singletonList(udfDependency), Configuration.fromMap(configMap));
         String sessionId = executor.openSession("test-session");
-        assertEquals("test-session", sessionId);
+        assertThat(sessionId).isEqualTo("test-session");
         initSession(executor, sessionId, replaceVars);
 
         final List<String> expectedResults = new ArrayList<>();
-        expectedResults.add("+I[47]");
-        expectedResults.add("+I[27]");
-        expectedResults.add("+I[37]");
-        expectedResults.add("+I[37]");
-        expectedResults.add("+I[47]");
-        expectedResults.add("+I[57]");
+        expectedResults.add("[47]");
+        expectedResults.add("[27]");
+        expectedResults.add("[37]");
+        expectedResults.add("[37]");
+        expectedResults.add("[47]");
+        expectedResults.add("[57]");
 
         try {
             for (int i = 0; i < 3; i++) {
                 final ResultDescriptor desc =
                         executeQuery(executor, sessionId, "SELECT * FROM TestView1");
 
-                assertTrue(desc.isMaterialized());
+                assertThat(desc.isMaterialized()).isTrue();
 
                 final List<String> actualResults =
-                        retrieveTableResult(executor, sessionId, desc.getResultId());
+                        retrieveTableResult(
+                                executor,
+                                sessionId,
+                                desc.getResultId(),
+                                desc.getRowDataStringConverter());
 
                 TestBaseUtils.compareResultCollections(
                         expectedResults, actualResults, Comparator.naturalOrder());
             }
+        } finally {
+            executor.closeSession(sessionId);
+        }
+    }
+
+    @Test
+    @Timeout(value = 90)
+    public void testStopJob() throws Exception {
+        final Map<String, String> configMap = new HashMap<>();
+        configMap.put(EXECUTION_RESULT_MODE.key(), ResultMode.TABLE.name());
+        configMap.put(RUNTIME_MODE.key(), RuntimeExecutionMode.STREAMING.name());
+        configMap.put(TableConfigOptions.TABLE_DML_SYNC.key(), "false");
+
+        final LocalExecutor executor =
+                createLocalExecutor(
+                        Collections.singletonList(udfDependency), Configuration.fromMap(configMap));
+        String sessionId = executor.openSession("test-session");
+
+        final String srcDdl = "CREATE TABLE src (a STRING) WITH ('connector' = 'datagen')";
+        final String snkDdl = "CREATE TABLE snk (a STRING) WITH ('connector' = 'blackhole')";
+        final String insert = "INSERT INTO snk SELECT a FROM src;";
+
+        try {
+            executor.executeOperation(sessionId, executor.parseStatement(sessionId, srcDdl));
+            executor.executeOperation(sessionId, executor.parseStatement(sessionId, snkDdl));
+            TableResult result =
+                    executor.executeOperation(
+                            sessionId, executor.parseStatement(sessionId, insert));
+            JobClient jobClient = result.getJobClient().get();
+            JobID jobId = jobClient.getJobID();
+
+            // wait till the job turns into running status or the test times out
+            JobStatus jobStatus;
+            do {
+                Thread.sleep(2_000L);
+                jobStatus = jobClient.getJobStatus().get();
+            } while (jobStatus != JobStatus.RUNNING);
+
+            Optional<String> savepoint = executor.stopJob(sessionId, jobId.toString(), true, true);
+            assertThat(savepoint.isPresent()).isTrue();
         } finally {
             executor.closeSession(sessionId);
         }
@@ -434,7 +516,7 @@ public class LocalExecutorITCase extends TestLogger {
                         Collections.singletonList(udfDependency), Configuration.fromMap(configMap));
         String sessionId = executor.openSession("test-session");
 
-        assertEquals("test-session", sessionId);
+        assertThat(sessionId).isEqualTo("test-session");
 
         initSession(executor, sessionId, replaceVars);
 
@@ -442,10 +524,14 @@ public class LocalExecutorITCase extends TestLogger {
             // start job and retrieval
             final ResultDescriptor desc = executeQuery(executor, sessionId, query);
 
-            assertTrue(desc.isMaterialized());
+            assertThat(desc.isMaterialized()).isTrue();
 
             final List<String> actualResults =
-                    retrieveTableResult(executor, sessionId, desc.getResultId());
+                    retrieveTableResult(
+                            executor,
+                            sessionId,
+                            desc.getResultId(),
+                            desc.getRowDataStringConverter());
 
             TestBaseUtils.compareResultCollections(
                     expectedResults, actualResults, Comparator.naturalOrder());
@@ -454,7 +540,11 @@ public class LocalExecutorITCase extends TestLogger {
         }
     }
 
-    private List<String> retrieveTableResult(Executor executor, String sessionId, String resultID)
+    private List<String> retrieveTableResult(
+            Executor executor,
+            String sessionId,
+            String resultID,
+            RowDataToStringConverter rowDataToStringConverter)
             throws InterruptedException {
 
         final List<String> actualResults = new ArrayList<>();
@@ -466,8 +556,11 @@ public class LocalExecutorITCase extends TestLogger {
                 IntStream.rangeClosed(1, result.getPayload())
                         .forEach(
                                 (page) -> {
-                                    for (Row row : executor.retrieveResultPage(resultID, page)) {
-                                        actualResults.add(row.toString());
+                                    for (RowData row :
+                                            executor.retrieveResultPage(resultID, page)) {
+                                        actualResults.add(
+                                                StringUtils.arrayAwareToString(
+                                                        rowDataToStringConverter.convert(row)));
                                     }
                                 });
             } else if (result.getType() == TypedResult.ResultType.EOS) {
@@ -479,16 +572,21 @@ public class LocalExecutorITCase extends TestLogger {
     }
 
     private List<String> retrieveChangelogResult(
-            Executor executor, String sessionId, String resultID) throws InterruptedException {
+            Executor executor,
+            String sessionId,
+            String resultID,
+            RowDataToStringConverter rowDataToStringConverter)
+            throws InterruptedException {
 
         final List<String> actualResults = new ArrayList<>();
         while (true) {
             Thread.sleep(50); // slow the processing down
-            final TypedResult<List<Row>> result =
+            final TypedResult<List<RowData>> result =
                     executor.retrieveResultChanges(sessionId, resultID);
             if (result.getType() == TypedResult.ResultType.PAYLOAD) {
-                for (Row row : result.getPayload()) {
-                    actualResults.add(row.toString());
+                for (RowData row : result.getPayload()) {
+                    actualResults.add(
+                            StringUtils.arrayAwareToString(rowDataToStringConverter.convert(row)));
                 }
             } else if (result.getType() == TypedResult.ResultType.EOS) {
                 break;
@@ -501,12 +599,12 @@ public class LocalExecutorITCase extends TestLogger {
         final List<String> actualResults = new ArrayList<>();
         TestBaseUtils.readAllResultLines(actualResults, path);
         final List<String> expectedResults = new ArrayList<>();
-        expectedResults.add("true,\"hello world\",\"2020-01-01 00:00:01\"");
-        expectedResults.add("false,\"hello world\",\"2020-01-01 00:00:02\"");
-        expectedResults.add("false,\"hello world\",\"2020-01-01 00:00:03\"");
-        expectedResults.add("false,\"hello world\",\"2020-01-01 00:00:04\"");
-        expectedResults.add("true,\"hello world\",\"2020-01-01 00:00:05\"");
-        expectedResults.add("false,\"hello world!!!!\",\"2020-01-01 00:00:06\"");
+        expectedResults.add("TRUE,\"hello world\",\"2020-01-01 00:00:01\"");
+        expectedResults.add("FALSE,\"hello world\",\"2020-01-01 00:00:02\"");
+        expectedResults.add("FALSE,\"hello world\",\"2020-01-01 00:00:03\"");
+        expectedResults.add("FALSE,\"hello world\",\"2020-01-01 00:00:04\"");
+        expectedResults.add("TRUE,\"hello world\",\"2020-01-01 00:00:05\"");
+        expectedResults.add("FALSE,\"hello world!!!!\",\"2020-01-01 00:00:06\"");
         TestBaseUtils.compareResultCollections(
                 expectedResults, actualResults, Comparator.naturalOrder());
     }
@@ -533,11 +631,14 @@ public class LocalExecutorITCase extends TestLogger {
     private List<String> getInitSQL(final Map<String, String> replaceVars) {
         return Stream.of(
                         String.format(
-                                "CREATE FUNCTION scalarUDF AS '%s'", ScalarUDF.class.getName()),
+                                "CREATE FUNCTION scalarUDF AS '%s'",
+                                UserDefinedFunctions.ScalarUDF.class.getName()),
                         String.format(
                                 "CREATE FUNCTION aggregateUDF AS '%s'",
                                 AggregateFunction.class.getName()),
-                        String.format("CREATE FUNCTION tableUDF AS '%s'", TableUDF.class.getName()),
+                        String.format(
+                                "CREATE FUNCTION tableUDF AS '%s'",
+                                UserDefinedFunctions.TableUDF.class.getName()),
                         "CREATE TABLE TableNumber1 (\n"
                                 + "  IntegerField1 INT,\n"
                                 + "  StringField1 STRING,\n"

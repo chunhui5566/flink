@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -108,16 +109,17 @@ public abstract class Transformation<T> {
     public static final int UPPER_BOUND_MAX_PARALLELISM = 1 << 15;
 
     // This is used to assign a unique ID to every Transformation
-    protected static Integer idCounter = 0;
+    private static final AtomicInteger ID_COUNTER = new AtomicInteger(0);
 
     public static int getNewNodeId() {
-        idCounter++;
-        return idCounter;
+        return ID_COUNTER.incrementAndGet();
     }
 
     protected final int id;
 
     protected String name;
+
+    protected String description;
 
     protected TypeInformation<T> outputType;
     // This is used to handle MissingTypeInfo. As long as the outputType has not been queried
@@ -201,6 +203,16 @@ public abstract class Transformation<T> {
     /** Returns the name of this {@code Transformation}. */
     public String getName() {
         return name;
+    }
+
+    /** Changes the description of this {@code Transformation}. */
+    public void setDescription(String description) {
+        this.description = Preconditions.checkNotNull(description);
+    }
+
+    /** Returns the description of this {@code Transformation}. */
+    public String getDescription() {
+        return description;
     }
 
     /** Returns the parallelism of this {@code Transformation}. */

@@ -18,16 +18,17 @@
 
 package org.apache.flink.connector.pulsar.testutils;
 
-import org.apache.flink.connectors.test.common.external.ExternalContext;
+import org.apache.flink.connector.pulsar.testutils.source.PulsarSourceTestContext;
+import org.apache.flink.connector.testframe.external.ExternalContextFactory;
 
 import java.util.function.Function;
 
 /**
- * Factory for creating all the test context that extends {@link PulsarTestContext}. Test context
- * class should have a constructor with {@link PulsarTestEnvironment} arg.
+ * Factory for creating all the test context that extends {@link PulsarSourceTestContext}. Test
+ * context class should have a constructor with single {@link PulsarTestEnvironment} arg.
  */
 public class PulsarTestContextFactory<F, T extends PulsarTestContext<F>>
-        implements ExternalContext.Factory<F> {
+        implements ExternalContextFactory<T> {
 
     private final PulsarTestEnvironment environment;
     private final Function<PulsarTestEnvironment, T> contextFactory;
@@ -39,7 +40,7 @@ public class PulsarTestContextFactory<F, T extends PulsarTestContext<F>>
     }
 
     @Override
-    public ExternalContext<F> createExternalContext() {
+    public T createExternalContext(String testName) {
         return contextFactory.apply(environment);
     }
 }

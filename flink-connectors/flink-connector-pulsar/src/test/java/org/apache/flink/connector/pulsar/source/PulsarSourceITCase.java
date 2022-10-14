@@ -20,54 +20,45 @@ package org.apache.flink.connector.pulsar.source;
 
 import org.apache.flink.connector.pulsar.testutils.PulsarTestContextFactory;
 import org.apache.flink.connector.pulsar.testutils.PulsarTestEnvironment;
-import org.apache.flink.connector.pulsar.testutils.cases.MultipleTopicConsumingContext;
-import org.apache.flink.connector.pulsar.testutils.cases.SingleTopicConsumingContext;
 import org.apache.flink.connector.pulsar.testutils.runtime.PulsarRuntime;
-import org.apache.flink.connectors.test.common.environment.ClusterControllable;
-import org.apache.flink.connectors.test.common.environment.MiniClusterTestEnvironment;
-import org.apache.flink.connectors.test.common.environment.TestEnvironment;
-import org.apache.flink.connectors.test.common.external.ExternalContext;
-import org.apache.flink.connectors.test.common.junit.annotations.ExternalContextFactory;
-import org.apache.flink.connectors.test.common.junit.annotations.ExternalSystem;
-import org.apache.flink.connectors.test.common.junit.annotations.TestEnv;
-import org.apache.flink.connectors.test.common.testsuites.SourceTestSuiteBase;
+import org.apache.flink.connector.pulsar.testutils.source.cases.MultipleTopicConsumingContext;
+import org.apache.flink.connector.pulsar.testutils.source.cases.SingleTopicConsumingContext;
+import org.apache.flink.connector.testframe.environment.MiniClusterTestEnvironment;
+import org.apache.flink.connector.testframe.junit.annotations.TestContext;
+import org.apache.flink.connector.testframe.junit.annotations.TestEnv;
+import org.apache.flink.connector.testframe.junit.annotations.TestExternalSystem;
+import org.apache.flink.connector.testframe.junit.annotations.TestSemantics;
+import org.apache.flink.connector.testframe.testsuites.SourceTestSuiteBase;
+import org.apache.flink.streaming.api.CheckpointingMode;
 
-import org.junit.jupiter.api.Disabled;
+import org.apache.pulsar.client.api.SubscriptionType;
+import org.junit.jupiter.api.Tag;
 
-/** Unite test class for {@link PulsarSource}. */
-@SuppressWarnings("unused")
+/**
+ * Unit test class for {@link PulsarSource}. Used for {@link SubscriptionType#Exclusive}
+ * subscription.
+ */
+@Tag("org.apache.flink.testutils.junit.FailsOnJava11")
 class PulsarSourceITCase extends SourceTestSuiteBase<String> {
 
     // Defines test environment on Flink MiniCluster
     @TestEnv MiniClusterTestEnvironment flink = new MiniClusterTestEnvironment();
 
     // Defines pulsar running environment
-    @ExternalSystem PulsarTestEnvironment pulsar = new PulsarTestEnvironment(PulsarRuntime.MOCK);
+    @TestExternalSystem
+    PulsarTestEnvironment pulsar = new PulsarTestEnvironment(PulsarRuntime.mock());
 
-    // Defines a external context Factories,
-    // so test cases will be invoked using this external contexts.
-    @ExternalContextFactory
+    // This field is preserved, we don't support the semantics in source currently.
+    @TestSemantics
+    CheckpointingMode[] semantics = new CheckpointingMode[] {CheckpointingMode.EXACTLY_ONCE};
+
+    // Defines an external context Factories,
+    // so test cases will be invoked using these external contexts.
+    @TestContext
     PulsarTestContextFactory<String, SingleTopicConsumingContext> singleTopic =
             new PulsarTestContextFactory<>(pulsar, SingleTopicConsumingContext::new);
 
-    @ExternalContextFactory
+    @TestContext
     PulsarTestContextFactory<String, MultipleTopicConsumingContext> multipleTopic =
             new PulsarTestContextFactory<>(pulsar, MultipleTopicConsumingContext::new);
-
-    @Disabled
-    @Override
-    public void testMultipleSplits(TestEnvironment testEnv, ExternalContext<String> externalContext)
-            throws Exception {
-        super.testMultipleSplits(testEnv, externalContext);
-    }
-
-    @Disabled
-    @Override
-    public void testTaskManagerFailure(
-            TestEnvironment testEnv,
-            ExternalContext<String> externalContext,
-            ClusterControllable controller)
-            throws Exception {
-        super.testTaskManagerFailure(testEnv, externalContext, controller);
-    }
 }

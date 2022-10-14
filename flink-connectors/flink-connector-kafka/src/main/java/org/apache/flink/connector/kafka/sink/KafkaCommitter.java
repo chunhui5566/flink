@@ -17,18 +17,21 @@
 
 package org.apache.flink.connector.kafka.sink;
 
-import org.apache.flink.api.connector.sink.Committer;
+import org.apache.flink.api.connector.sink2.Committer;
 
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.errors.InvalidTxnStateException;
 import org.apache.kafka.common.errors.ProducerFencedException;
+import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.UnknownProducerIdException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.Closeable;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Collection;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -37,9 +40,12 @@ import java.util.Properties;
  *
  * <p>The committer is responsible to finalize the Kafka transactions by committing them.
  */
-class KafkaCommitter implements Committer<KafkaCommittable> {
+class KafkaCommitter implements Committer<KafkaCommittable>, Closeable {
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaCommitter.class);
+    public static final String UNKNOWN_PRODUCER_ID_ERROR_MESSAGE =
+            "because of a bug in the Kafka broker (KAFKA-9310). Please upgrade to Kafka 2.5+. If you are running with concurrent checkpoints, you also may want to try without them.\n"
+                    + "To avoid data loss, the application will restart.";
 
     private final Properties kafkaProducerConfig;
 
@@ -50,9 +56,10 @@ class KafkaCommitter implements Committer<KafkaCommittable> {
     }
 
     @Override
-    public List<KafkaCommittable> commit(List<KafkaCommittable> committables) throws IOException {
-        List<KafkaCommittable> retryableCommittables = new ArrayList<>();
-        for (KafkaCommittable committable : committables) {
+    public void commit(Collection<CommitRequest<KafkaCommittable>> requests)
+            throws IOException, InterruptedException {
+        for (CommitRequest<KafkaCommittable> request : requests) {
+            final KafkaCommittable committable = request.getCommittable();
             final String transactionalId = committable.getTransactionalId();
             LOG.debug("Committing Kafka transaction {}", transactionalId);
             Optional<Recyclable<? extends FlinkKafkaInternalProducer<?, ?>>> recyclable =
@@ -64,25 +71,58 @@ class KafkaCommitter implements Committer<KafkaCommittable> {
                                 .<FlinkKafkaInternalProducer<?, ?>>map(Recyclable::getObject)
                                 .orElseGet(() -> getRecoveryProducer(committable));
                 producer.commitTransaction();
+                producer.flush();
                 recyclable.ifPresent(Recyclable::close);
-            } catch (ProducerFencedException | InvalidTxnStateException e) {
-                // That means we have committed this transaction before.
+            } catch (RetriableException e) {
                 LOG.warn(
-                        "Encountered error {} while recovering transaction {}. "
-                                + "Presumably this transaction has been already committed before",
-                        e,
-                        committable);
+                        "Encountered retriable exception while committing {}.", transactionalId, e);
+                request.retryLater();
+            } catch (ProducerFencedException e) {
+                // initTransaction has been called on this transaction before
+                LOG.error(
+                        "Unable to commit transaction ({}) because its producer is already fenced."
+                                + " This means that you either have a different producer with the same '{}' (this is"
+                                + " unlikely with the '{}' as all generated ids are unique and shouldn't be reused)"
+                                + " or recovery took longer than '{}' ({}ms). In both cases this most likely signals data loss,"
+                                + " please consult the Flink documentation for more details.",
+                        request,
+                        ProducerConfig.TRANSACTIONAL_ID_CONFIG,
+                        KafkaSink.class.getSimpleName(),
+                        ProducerConfig.TRANSACTION_TIMEOUT_CONFIG,
+                        kafkaProducerConfig.getProperty(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG),
+                        e);
                 recyclable.ifPresent(Recyclable::close);
-            } catch (Throwable e) {
-                LOG.warn("Cannot commit Kafka transaction, retrying.", e);
-                retryableCommittables.add(committable);
+                request.signalFailedWithKnownReason(e);
+            } catch (InvalidTxnStateException e) {
+                // This exception only occurs when aborting after a commit or vice versa.
+                // It does not appear on double commits or double aborts.
+                LOG.error(
+                        "Unable to commit transaction ({}) because it's in an invalid state. "
+                                + "Most likely the transaction has been aborted for some reason. Please check the Kafka logs for more details.",
+                        request,
+                        e);
+                recyclable.ifPresent(Recyclable::close);
+                request.signalFailedWithKnownReason(e);
+            } catch (UnknownProducerIdException e) {
+                LOG.error(
+                        "Unable to commit transaction ({}) " + UNKNOWN_PRODUCER_ID_ERROR_MESSAGE,
+                        request,
+                        e);
+                recyclable.ifPresent(Recyclable::close);
+                request.signalFailedWithKnownReason(e);
+            } catch (Exception e) {
+                LOG.error(
+                        "Transaction ({}) encountered error and data has been potentially lost.",
+                        request,
+                        e);
+                recyclable.ifPresent(Recyclable::close);
+                request.signalFailedWithUnknownReason(e);
             }
         }
-        return retryableCommittables;
     }
 
     @Override
-    public void close() throws Exception {
+    public void close() {
         if (recoveryProducer != null) {
             recoveryProducer.close();
         }

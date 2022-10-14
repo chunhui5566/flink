@@ -24,27 +24,35 @@ import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.connector.jdbc.JdbcExecutionOptions;
 import org.apache.flink.connector.jdbc.dialect.JdbcDialect;
-import org.apache.flink.connector.jdbc.dialect.JdbcDialects;
+import org.apache.flink.connector.jdbc.dialect.JdbcDialectLoader;
 import org.apache.flink.connector.jdbc.internal.options.JdbcConnectorOptions;
 import org.apache.flink.connector.jdbc.internal.options.JdbcDmlOptions;
-import org.apache.flink.connector.jdbc.internal.options.JdbcLookupOptions;
 import org.apache.flink.connector.jdbc.internal.options.JdbcReadOptions;
-import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.source.DynamicTableSource;
+import org.apache.flink.table.connector.source.lookup.LookupOptions;
+import org.apache.flink.table.connector.source.lookup.cache.DefaultLookupCache;
+import org.apache.flink.table.connector.source.lookup.cache.LookupCache;
 import org.apache.flink.table.factories.DynamicTableSinkFactory;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
-import org.apache.flink.table.utils.TableSchemaUtils;
+import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Preconditions;
 
+import javax.annotation.Nullable;
+
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.DRIVER;
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.LOOKUP_CACHE_MAX_ROWS;
+import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.LOOKUP_CACHE_MISSING_KEY;
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.LOOKUP_CACHE_TTL;
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.LOOKUP_MAX_RETRIES;
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.MAX_RETRY_TIMEOUT;
@@ -62,7 +70,6 @@ import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.SINK_PA
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.TABLE_NAME;
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.URL;
 import static org.apache.flink.connector.jdbc.table.JdbcConnectorOptions.USERNAME;
-import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * Factory for creating configured instances of {@link JdbcDynamicTableSource} and {@link
@@ -80,16 +87,19 @@ public class JdbcDynamicTableFactory implements DynamicTableSourceFactory, Dynam
         final ReadableConfig config = helper.getOptions();
 
         helper.validate();
-        validateConfigOptions(config);
-        JdbcConnectorOptions jdbcOptions = getJdbcOptions(config);
-        TableSchema physicalSchema =
-                TableSchemaUtils.getPhysicalSchema(context.getCatalogTable().getSchema());
+        validateConfigOptions(config, context.getClassLoader());
+        validateDataTypeWithJdbcDialect(
+                context.getPhysicalRowDataType(), config.get(URL), context.getClassLoader());
+        JdbcConnectorOptions jdbcOptions = getJdbcOptions(config, context.getClassLoader());
 
         return new JdbcDynamicTableSink(
                 jdbcOptions,
                 getJdbcExecutionOptions(config),
-                getJdbcDmlOptions(jdbcOptions, physicalSchema),
-                physicalSchema);
+                getJdbcDmlOptions(
+                        jdbcOptions,
+                        context.getPhysicalRowDataType(),
+                        context.getPrimaryKeyIndexes()),
+                context.getPhysicalRowDataType());
     }
 
     @Override
@@ -99,23 +109,32 @@ public class JdbcDynamicTableFactory implements DynamicTableSourceFactory, Dynam
         final ReadableConfig config = helper.getOptions();
 
         helper.validate();
-        validateConfigOptions(config);
-        TableSchema physicalSchema =
-                TableSchemaUtils.getPhysicalSchema(context.getCatalogTable().getSchema());
+        validateConfigOptions(config, context.getClassLoader());
+        validateDataTypeWithJdbcDialect(
+                context.getPhysicalRowDataType(), config.get(URL), context.getClassLoader());
         return new JdbcDynamicTableSource(
-                getJdbcOptions(helper.getOptions()),
+                getJdbcOptions(helper.getOptions(), context.getClassLoader()),
                 getJdbcReadOptions(helper.getOptions()),
-                getJdbcLookupOptions(helper.getOptions()),
-                physicalSchema);
+                helper.getOptions().get(LookupOptions.MAX_RETRIES),
+                getLookupCache(config),
+                context.getPhysicalRowDataType());
     }
 
-    private JdbcConnectorOptions getJdbcOptions(ReadableConfig readableConfig) {
+    private static void validateDataTypeWithJdbcDialect(
+            DataType dataType, String url, ClassLoader classLoader) {
+        final JdbcDialect dialect = JdbcDialectLoader.load(url, classLoader);
+        dialect.validate((RowType) dataType.getLogicalType());
+    }
+
+    private JdbcConnectorOptions getJdbcOptions(
+            ReadableConfig readableConfig, ClassLoader classLoader) {
         final String url = readableConfig.get(URL);
         final JdbcConnectorOptions.Builder builder =
                 JdbcConnectorOptions.builder()
+                        .setClassLoader(classLoader)
                         .setDBUrl(url)
                         .setTableName(readableConfig.get(TABLE_NAME))
-                        .setDialect(JdbcDialects.get(url).get())
+                        .setDialect(JdbcDialectLoader.load(url, classLoader))
                         .setParallelism(readableConfig.getOptional(SINK_PARALLELISM).orElse(null))
                         .setConnectionCheckTimeoutSeconds(
                                 (int) readableConfig.get(MAX_RETRY_TIMEOUT).getSeconds());
@@ -141,13 +160,6 @@ public class JdbcDynamicTableFactory implements DynamicTableSourceFactory, Dynam
         return builder.build();
     }
 
-    private JdbcLookupOptions getJdbcLookupOptions(ReadableConfig readableConfig) {
-        return new JdbcLookupOptions(
-                readableConfig.get(LOOKUP_CACHE_MAX_ROWS),
-                readableConfig.get(LOOKUP_CACHE_TTL).toMillis(),
-                readableConfig.get(LOOKUP_MAX_RETRIES));
-    }
-
     private JdbcExecutionOptions getJdbcExecutionOptions(ReadableConfig config) {
         final JdbcExecutionOptions.Builder builder = new JdbcExecutionOptions.Builder();
         builder.withBatchSize(config.get(SINK_BUFFER_FLUSH_MAX_ROWS));
@@ -156,18 +168,41 @@ public class JdbcDynamicTableFactory implements DynamicTableSourceFactory, Dynam
         return builder.build();
     }
 
-    private JdbcDmlOptions getJdbcDmlOptions(JdbcConnectorOptions jdbcOptions, TableSchema schema) {
+    private JdbcDmlOptions getJdbcDmlOptions(
+            JdbcConnectorOptions jdbcOptions, DataType dataType, int[] primaryKeyIndexes) {
+
         String[] keyFields =
-                schema.getPrimaryKey()
-                        .map(pk -> pk.getColumns().toArray(new String[0]))
-                        .orElse(null);
+                Arrays.stream(primaryKeyIndexes)
+                        .mapToObj(i -> DataType.getFieldNames(dataType).get(i))
+                        .toArray(String[]::new);
 
         return JdbcDmlOptions.builder()
                 .withTableName(jdbcOptions.getTableName())
                 .withDialect(jdbcOptions.getDialect())
-                .withFieldNames(schema.getFieldNames())
-                .withKeyFields(keyFields)
+                .withFieldNames(DataType.getFieldNames(dataType).toArray(new String[0]))
+                .withKeyFields(keyFields.length > 0 ? keyFields : null)
                 .build();
+    }
+
+    @Nullable
+    private LookupCache getLookupCache(ReadableConfig tableOptions) {
+        LookupCache cache = null;
+        // Legacy cache options
+        if (tableOptions.get(LOOKUP_CACHE_MAX_ROWS) > 0
+                && tableOptions.get(LOOKUP_CACHE_TTL).compareTo(Duration.ZERO) > 0) {
+            cache =
+                    DefaultLookupCache.newBuilder()
+                            .maximumSize(tableOptions.get(LOOKUP_CACHE_MAX_ROWS))
+                            .expireAfterWrite(tableOptions.get(LOOKUP_CACHE_TTL))
+                            .cacheMissingKey(tableOptions.get(LOOKUP_CACHE_MISSING_KEY))
+                            .build();
+        }
+        if (tableOptions
+                .get(LookupOptions.CACHE_TYPE)
+                .equals(LookupOptions.LookupCacheType.PARTIAL)) {
+            cache = DefaultLookupCache.fromConfig(tableOptions);
+        }
+        return cache;
     }
 
     @Override
@@ -198,18 +233,41 @@ public class JdbcDynamicTableFactory implements DynamicTableSourceFactory, Dynam
         optionalOptions.add(LOOKUP_CACHE_MAX_ROWS);
         optionalOptions.add(LOOKUP_CACHE_TTL);
         optionalOptions.add(LOOKUP_MAX_RETRIES);
+        optionalOptions.add(LOOKUP_CACHE_MISSING_KEY);
         optionalOptions.add(SINK_BUFFER_FLUSH_MAX_ROWS);
         optionalOptions.add(SINK_BUFFER_FLUSH_INTERVAL);
         optionalOptions.add(SINK_MAX_RETRIES);
         optionalOptions.add(SINK_PARALLELISM);
         optionalOptions.add(MAX_RETRY_TIMEOUT);
+        optionalOptions.add(LookupOptions.CACHE_TYPE);
+        optionalOptions.add(LookupOptions.PARTIAL_CACHE_EXPIRE_AFTER_ACCESS);
+        optionalOptions.add(LookupOptions.PARTIAL_CACHE_EXPIRE_AFTER_WRITE);
+        optionalOptions.add(LookupOptions.PARTIAL_CACHE_MAX_ROWS);
+        optionalOptions.add(LookupOptions.PARTIAL_CACHE_CACHE_MISSING_KEY);
+        optionalOptions.add(LookupOptions.MAX_RETRIES);
         return optionalOptions;
     }
 
-    private void validateConfigOptions(ReadableConfig config) {
+    @Override
+    public Set<ConfigOption<?>> forwardOptions() {
+        return Stream.of(
+                        URL,
+                        TABLE_NAME,
+                        USERNAME,
+                        PASSWORD,
+                        DRIVER,
+                        SINK_BUFFER_FLUSH_MAX_ROWS,
+                        SINK_BUFFER_FLUSH_INTERVAL,
+                        SINK_MAX_RETRIES,
+                        MAX_RETRY_TIMEOUT,
+                        SCAN_FETCH_SIZE,
+                        SCAN_AUTO_COMMIT)
+                .collect(Collectors.toSet());
+    }
+
+    private void validateConfigOptions(ReadableConfig config, ClassLoader classLoader) {
         String jdbcUrl = config.get(URL);
-        final Optional<JdbcDialect> dialect = JdbcDialects.get(jdbcUrl);
-        checkState(dialect.isPresent(), "Cannot handle such jdbc url: " + jdbcUrl);
+        JdbcDialectLoader.load(jdbcUrl, classLoader);
 
         checkAllOrNone(config, new ConfigOption[] {USERNAME, PASSWORD});
 

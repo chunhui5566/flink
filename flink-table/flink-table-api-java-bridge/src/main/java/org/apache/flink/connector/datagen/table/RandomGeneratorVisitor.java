@@ -31,8 +31,10 @@ import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.data.GenericArrayData;
 import org.apache.flink.table.data.GenericMapData;
 import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.BinaryType;
 import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.CharType;
 import org.apache.flink.table.types.logical.DayTimeIntervalType;
@@ -40,15 +42,20 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
 import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.MultisetType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.SmallIntType;
+import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.TinyIntType;
+import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.YearMonthIntervalType;
+import org.apache.flink.table.types.logical.ZonedTimestampType;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -63,11 +70,15 @@ public class RandomGeneratorVisitor extends DataGenVisitorBase {
 
     public static final int RANDOM_STRING_LENGTH_DEFAULT = 100;
 
+    public static final int RANDOM_BYTES_LENGTH_DEFAULT = 100;
+
     private static final int RANDOM_COLLECTION_LENGTH_DEFAULT = 3;
 
     private final ConfigOptions.OptionBuilder minKey;
 
     private final ConfigOptions.OptionBuilder maxKey;
+
+    private final ConfigOptions.OptionBuilder maxPastKey;
 
     public RandomGeneratorVisitor(String name, ReadableConfig config) {
         super(name, config);
@@ -86,6 +97,13 @@ public class RandomGeneratorVisitor extends DataGenVisitorBase {
                                 + name
                                 + "."
                                 + DataGenConnectorOptionsUtil.MAX);
+        this.maxPastKey =
+                key(
+                        DataGenConnectorOptionsUtil.FIELDS
+                                + "."
+                                + name
+                                + "."
+                                + DataGenConnectorOptionsUtil.MAX_PAST);
     }
 
     @Override
@@ -119,6 +137,32 @@ public class RandomGeneratorVisitor extends DataGenVisitorBase {
                         .defaultValue(RANDOM_STRING_LENGTH_DEFAULT);
         return DataGeneratorContainer.of(
                 getRandomStringGenerator(config.get(lenOption)), lenOption);
+    }
+
+    @Override
+    public DataGeneratorContainer visit(BinaryType binaryType) {
+        ConfigOption<Integer> lenOption =
+                key(DataGenConnectorOptionsUtil.FIELDS
+                                + "."
+                                + name
+                                + "."
+                                + DataGenConnectorOptionsUtil.LENGTH)
+                        .intType()
+                        .defaultValue(RANDOM_BYTES_LENGTH_DEFAULT);
+        return DataGeneratorContainer.of(getRandomBytesGenerator(config.get(lenOption)), lenOption);
+    }
+
+    @Override
+    public DataGeneratorContainer visit(VarBinaryType varBinaryType) {
+        ConfigOption<Integer> lenOption =
+                key(DataGenConnectorOptionsUtil.FIELDS
+                                + "."
+                                + name
+                                + "."
+                                + DataGenConnectorOptionsUtil.LENGTH)
+                        .intType()
+                        .defaultValue(RANDOM_BYTES_LENGTH_DEFAULT);
+        return DataGeneratorContainer.of(getRandomBytesGenerator(config.get(lenOption)), lenOption);
     }
 
     @Override
@@ -201,6 +245,33 @@ public class RandomGeneratorVisitor extends DataGenVisitorBase {
         ConfigOption<Long> max = maxKey.longType().defaultValue(Long.MAX_VALUE);
         return DataGeneratorContainer.of(
                 RandomGenerator.longGenerator(config.get(min), config.get(max)), min, max);
+    }
+
+    @Override
+    public DataGeneratorContainer visit(TimestampType timestampType) {
+        ConfigOption<Duration> maxPastOption =
+                maxPastKey.durationType().defaultValue(Duration.ZERO);
+
+        return DataGeneratorContainer.of(
+                getRandomPastTimestampGenerator(config.get(maxPastOption)), maxPastOption);
+    }
+
+    @Override
+    public DataGeneratorContainer visit(ZonedTimestampType zonedTimestampType) {
+        ConfigOption<Duration> maxPastOption =
+                maxPastKey.durationType().defaultValue(Duration.ZERO);
+
+        return DataGeneratorContainer.of(
+                getRandomPastTimestampGenerator(config.get(maxPastOption)), maxPastOption);
+    }
+
+    @Override
+    public DataGeneratorContainer visit(LocalZonedTimestampType localZonedTimestampType) {
+        ConfigOption<Duration> maxPastOption =
+                maxPastKey.durationType().defaultValue(Duration.ZERO);
+
+        return DataGeneratorContainer.of(
+                getRandomPastTimestampGenerator(config.get(maxPastOption)), maxPastOption);
     }
 
     @Override
@@ -307,9 +378,8 @@ public class RandomGeneratorVisitor extends DataGenVisitorBase {
                         .map(DataGeneratorContainer::getGenerator)
                         .toArray(DataGenerator[]::new);
 
-        String[] fieldNames = rowType.getFieldNames().toArray(new String[0]);
-
-        return DataGeneratorContainer.of(new RowDataGenerator(generators, fieldNames), options);
+        return DataGeneratorContainer.of(
+                new RowDataGenerator(generators, rowType.getFieldNames()), options);
     }
 
     @Override
@@ -322,6 +392,29 @@ public class RandomGeneratorVisitor extends DataGenVisitorBase {
             @Override
             public StringData next() {
                 return StringData.fromString(random.nextHexString(length));
+            }
+        };
+    }
+
+    private static RandomGenerator<TimestampData> getRandomPastTimestampGenerator(
+            Duration maxPast) {
+        return new RandomGenerator<TimestampData>() {
+            @Override
+            public TimestampData next() {
+                long maxPastMillis = maxPast.toMillis();
+                long past = maxPastMillis > 0 ? random.nextLong(0, maxPastMillis) : 0;
+                return TimestampData.fromEpochMillis(System.currentTimeMillis() - past);
+            }
+        };
+    }
+
+    private static RandomGenerator<byte[]> getRandomBytesGenerator(int length) {
+        return new RandomGenerator<byte[]>() {
+            @Override
+            public byte[] next() {
+                byte[] arr = new byte[length];
+                random.getRandomGenerator().nextBytes(arr);
+                return arr;
             }
         };
     }
