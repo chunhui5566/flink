@@ -43,24 +43,6 @@ You do not need to modify your existing Hive Metastore or change the data placem
 
 Flink supports the following Hive versions.
 
-- 1.0
-    - 1.0.0
-    - 1.0.1
-- 1.1
-    - 1.1.0
-    - 1.1.1
-- 1.2
-    - 1.2.0
-    - 1.2.1
-    - 1.2.2
-- 2.0
-    - 2.0.0
-    - 2.0.1
-- 2.1
-    - 2.1.0
-    - 2.1.1
-- 2.2
-    - 2.2.0
 - 2.3
     - 2.3.0
     - 2.3.1
@@ -110,7 +92,7 @@ The following tables list all available bundled hive jars. You can pick one to t
 | Metastore version | Maven dependency                 | SQL Client JAR                                                                                                                                                                                                                                                                                                   |
 |:------------------|:---------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 2.3.0 - 2.3.9     | `flink-sql-connector-hive-2.3.9` | {{< stable >}}[Download](https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-hive-2.3.9{{< scala_version >}}/{{< version >}}/flink-sql-connector-hive-2.3.9{{< scala_version >}}-{{< version >}}.jar) {{< /stable >}}{{< unstable >}} Only available for stable releases {{< /unstable >}} |
-| 3.0.0 - 3.1.2     | `flink-sql-connector-hive-3.1.2` | {{< stable >}}[Download](https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-hive-3.1.2{{< scala_version >}}/{{< version >}}/flink-sql-connector-hive-3.1.2{{< scala_version >}}-{{< version >}}.jar) {{< /stable >}}{{< unstable >}} Only available for stable releases {{< /unstable >}} |
+| 3.0.0 - 3.1.3     | `flink-sql-connector-hive-3.1.3` | {{< stable >}}[Download](https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-hive-3.1.3{{< scala_version >}}/{{< version >}}/flink-sql-connector-hive-3.1.3{{< scala_version >}}-{{< version >}}.jar) {{< /stable >}}{{< unstable >}} Only available for stable releases {{< /unstable >}} |
 
 #### User defined dependencies
 
@@ -128,124 +110,6 @@ Please find the required dependencies for different Hive major versions below.
 
        // Hive dependencies
        hive-exec-2.3.4.jar
-
-       // add antlr-runtime if you need to use hive dialect
-       antlr-runtime-3.5.2.jar
-
-```
-{{< /tab >}}
-{{< tab "Hive 1.0.0" >}}
-```txt
-/flink-{{< version >}}
-   /lib
-
-       // Flink's Hive connector
-       flink-connector-hive{{< scala_version >}}-{{< version >}}.jar
-
-       // Hive dependencies
-       hive-metastore-1.0.0.jar
-       hive-exec-1.0.0.jar
-       libfb303-0.9.0.jar // libfb303 is not packed into hive-exec in some versions, need to add it separately
-       
-       // Orc dependencies -- required by the ORC vectorized optimizations
-       orc-core-1.4.3-nohive.jar
-       aircompressor-0.8.jar // transitive dependency of orc-core
-
-       // add antlr-runtime if you need to use hive dialect
-       antlr-runtime-3.5.2.jar
-
-```
-{{< /tab >}}
-{{< tab "Hive 1.1.0" >}}
-```txt
-/flink-{{< version >}}
-   /lib
-
-       // Flink's Hive connector
-       flink-connector-hive{{< scala_version >}}-{{< version >}}.jar
-
-       // Hive dependencies
-       hive-metastore-1.1.0.jar
-       hive-exec-1.1.0.jar
-       libfb303-0.9.2.jar // libfb303 is not packed into hive-exec in some versions, need to add it separately
-
-       // Orc dependencies -- required by the ORC vectorized optimizations
-       orc-core-1.4.3-nohive.jar
-       aircompressor-0.8.jar // transitive dependency of orc-core
-
-       // add antlr-runtime if you need to use hive dialect
-       antlr-runtime-3.5.2.jar
-
-```
-{{< /tab >}}
-{{< tab "Hive 1.2.1" >}}
-```txt
-/flink-{{< version >}}
-   /lib
-
-       // Flink's Hive connector
-       flink-connector-hive{{< scala_version >}}-{{< version >}}.jar
-
-       // Hive dependencies
-       hive-metastore-1.2.1.jar
-       hive-exec-1.2.1.jar
-       libfb303-0.9.2.jar // libfb303 is not packed into hive-exec in some versions, need to add it separately
-
-       // Orc dependencies -- required by the ORC vectorized optimizations
-       orc-core-1.4.3-nohive.jar
-       aircompressor-0.8.jar // transitive dependency of orc-core
-
-       // add antlr-runtime if you need to use hive dialect
-       antlr-runtime-3.5.2.jar
-
-```
-{{< /tab >}}
-{{< tab "Hive 2.0.0" >}}
-```txt
-/flink-{{< version >}}
-   /lib
-
-       // Flink's Hive connector
-       flink-connector-hive{{< scala_version >}}-{{< version >}}.jar
-
-       // Hive dependencies
-       hive-exec-2.0.0.jar
-
-       // add antlr-runtime if you need to use hive dialect
-       antlr-runtime-3.5.2.jar
-
-```
-{{< /tab >}}
-{{< tab "Hive 2.1.0" >}}
-```txt
-/flink-{{< version >}}
-   /lib
-
-       // Flink's Hive connector
-       flink-connector-hive{{< scala_version >}}-{{< version >}}.jar
-
-       // Hive dependencies
-       hive-exec-2.1.0.jar
-
-       // add antlr-runtime if you need to use hive dialect
-       antlr-runtime-3.5.2.jar
-
-```
-{{< /tab >}}
-{{< tab "Hive 2.2.0" >}}
-```txt
-/flink-{{< version >}}
-   /lib
-
-       // Flink's Hive connector
-       flink-connector-hive{{< scala_version >}}-{{< version >}}.jar
-
-       // Hive dependencies
-       hive-exec-2.2.0.jar
-
-       // Orc dependencies -- required by the ORC vectorized optimizations
-       orc-core-1.4.3.jar
-       aircompressor-0.8.jar // transitive dependency of orc-core
 
        // add antlr-runtime if you need to use hive dialect
        antlr-runtime-3.5.2.jar

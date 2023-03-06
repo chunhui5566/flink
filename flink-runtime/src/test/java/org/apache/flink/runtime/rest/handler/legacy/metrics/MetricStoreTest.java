@@ -27,7 +27,6 @@ import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
 
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -43,7 +42,7 @@ class MetricStoreTest {
     private static final JobID JOB_ID = new JobID();
 
     @Test
-    void testAdd() throws IOException {
+    void testAdd() {
         MetricStore store = setupStore(new MetricStore());
 
         assertThat(store.getJobManagerMetricStore().getMetric("abc.metric1", "-1")).isEqualTo("0");
@@ -100,6 +99,18 @@ class MetricStoreTest {
                         store.getSubtaskAttemptMetricStore(JOB_ID.toString(), "taskid", 8, 4)
                                 .getMetric("opname.abc.metric7", "-1"))
                 .isEqualTo("16");
+
+        assertThat(
+                        store.getTaskMetricStore(JOB_ID.toString(), "taskid")
+                                .getJobManagerOperatorMetricStores("opname")
+                                .getMetric("abc.metric8", "-1"))
+                .isEqualTo("19");
+
+        assertThat(
+                        store.getTaskMetricStore(JOB_ID.toString(), "taskid")
+                                .getJobManagerOperatorMetricStores("opname")
+                                .getMetric("abc.metric9", "-1"))
+                .isEqualTo("20");
     }
 
     @Test
@@ -119,6 +130,40 @@ class MetricStoreTest {
         assertThat(store.getJobManager().metrics).isEmpty();
         assertThat(store.getTaskManagers()).isEmpty();
         assertThat(store.getJobs()).isEmpty();
+    }
+
+    @Test
+    void testTaskMetricStoreCleanup() {
+        MetricStore store = setupStore(new MetricStore());
+        assertThat(
+                        store.getTaskMetricStore(JOB_ID.toString(), "taskid")
+                                .getAllSubtaskMetricStores()
+                                .keySet())
+                .containsExactlyInAnyOrderElementsOf(Arrays.asList(1, 8));
+
+        Map<String, Map<Integer, CurrentAttempts>> currentExecutionAttempts =
+                Collections.singletonMap(
+                        "taskid",
+                        Collections.singletonMap(1, new CurrentAttempts(1, new HashSet<>())));
+        JobDetails jobDetail =
+                new JobDetails(
+                        JOB_ID,
+                        "jobname",
+                        0,
+                        0,
+                        0,
+                        JobStatus.RUNNING,
+                        0,
+                        new int[10],
+                        1,
+                        currentExecutionAttempts);
+        store.updateCurrentExecutionAttempts(Collections.singleton(jobDetail));
+
+        assertThat(
+                        store.getTaskMetricStore(JOB_ID.toString(), "taskid")
+                                .getAllSubtaskMetricStores()
+                                .keySet())
+                .containsExactlyInAnyOrderElementsOf(Collections.singletonList(1));
     }
 
     @Test
@@ -224,6 +269,12 @@ class MetricStoreTest {
         MetricDump.CounterDump cd74 =
                 new MetricDump.CounterDump(speculativeOperator3, "metric7", 18);
 
+        QueryScopeInfo.JobManagerOperatorQueryScopeInfo jmOperator =
+                new QueryScopeInfo.JobManagerOperatorQueryScopeInfo(
+                        JOB_ID.toString(), "taskid", "opname", "abc");
+        MetricDump.CounterDump jmCd8 = new MetricDump.CounterDump(jmOperator, "metric8", 19);
+        MetricDump.CounterDump jmCd9 = new MetricDump.CounterDump(jmOperator, "metric9", 20);
+
         store.add(cd1);
         store.add(cd2);
         store.add(cd2a);
@@ -245,6 +296,9 @@ class MetricStoreTest {
         store.add(cd73);
         store.add(cd64);
         store.add(cd74);
+
+        store.add(jmCd8);
+        store.add(jmCd9);
 
         return store;
     }

@@ -211,7 +211,11 @@ public class PlannerContext {
         final FlinkCalciteCatalogReader calciteCatalogReader = createCatalogReader(false);
 
         // Sets up the ViewExpander explicitly for FlinkRelBuilder.
-        final Context chain = Contexts.of(context, planner.createToRelContext());
+        final Context chain =
+                Contexts.of(
+                        context,
+                        planner.createToRelContext(),
+                        FlinkRelBuilder.FLINK_REL_BUILDER_CONFIG);
 
         return FlinkRelBuilder.of(chain, cluster, calciteCatalogReader);
     }
@@ -315,6 +319,6 @@ public class PlannerContext {
                         context.getCatalogManager().getDataTypeFactory(),
                         typeFactory,
                         context.getRexFactory()),
-                FlinkSqlOperatorTable.instance());
+                FlinkSqlOperatorTable.instance(context.isBatchMode()));
     }
 }
